@@ -1,7 +1,7 @@
 /**
  * dsh-plan-guard Client half: the "Guarded context" drawer as a right-sidebar
  * tab, backed by the `plan-guard` Host Remote namespace and a self-refreshing
- * `plan-guard-drawer://` resource.
+ * `dsh-resource://plan-guard-drawer/<sessionId>` resource.
  *
  * Plain-JS UI plugin (window.__ModuleLoader__ module): React comes from the
  * browser module table; behavior reaches the components through the inject
@@ -263,12 +263,14 @@ window.__ModuleLoader__.load({
 
     const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
 
+    const RESOURCE_SCHEME = 'dsh-resource://'
+
     /** The one drawer resource address for a session. */
-    const drawerAddress = (sessionId) => `${TAB_KIND}://${encodeURIComponent(sessionId)}`
+    const drawerAddress = (sessionId) => `${RESOURCE_SCHEME}${TAB_KIND}/${encodeURIComponent(sessionId)}`
 
     const sessionIdOfAddress = (address) => {
-      const prefix = `${TAB_KIND}://`
-      if (!address.startsWith(prefix)) return undefined
+      const prefix = `${RESOURCE_SCHEME}${TAB_KIND}/`
+      if (typeof address !== 'string' || !address.startsWith(prefix)) return undefined
       try { return decodeURIComponent(address.slice(prefix.length)) } catch (_error) { return undefined }
     }
 
@@ -706,6 +708,7 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'],
+      __testables: { drawerAddress, sessionIdOfAddress },
       async apply(ctx) {
         const t = ctx.locale.bind(LOCALE_NS)
         ctx.effect(() => ctx.locale.register(LOCALE_NS, DICTS), 'dsh-plan-guard: dictionaries')

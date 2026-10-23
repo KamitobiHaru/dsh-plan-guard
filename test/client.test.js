@@ -84,6 +84,14 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.deepEqual(required, ['react'])
   assert.deepEqual([...module.inject], ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'])
 
+  // Resource addresses must use the platform scheme; `<protocol>://` is not a
+  // resource address and would leave `useResource` permanently unresolved.
+  const { drawerAddress, sessionIdOfAddress } = module.__testables
+  assert.equal(drawerAddress('a b'), 'dsh-resource://plan-guard-drawer/a%20b')
+  assert.equal(new URL(drawerAddress('a b')).host, 'plan-guard-drawer')
+  assert.equal(sessionIdOfAddress(drawerAddress('a b')), 'a b')
+  assert.equal(sessionIdOfAddress('plan-guard-drawer://a'), undefined)
+
   const captured = { slots: [], resources: [], tabs: [] }
   await module.apply(fakeContext(captured))
 
@@ -94,6 +102,7 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.equal(captured.tabs[0].kind, 'plan-guard-drawer')
   assert.equal(captured.resources.length, 1)
   assert.equal(captured.resources[0].protocol, 'plan-guard-drawer')
+  assert.equal(new URL(drawerAddress('s1')).host, captured.resources[0].protocol)
   assert.equal(captured.slots.length, 2)
 
   const endpoints = new Set()

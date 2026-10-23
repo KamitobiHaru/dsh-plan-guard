@@ -35,6 +35,7 @@
 6. 注入：`agent/pre-step` 瀑布 `await next()` 后 splice 一条 user 消息，agent-loop 落事件（模型可见 ⟺ 已记录）。
 7. 与 `dsh-compaction-tune` 零交集：不改压缩配置/预设，只读会话事件与 storage。
 8. Web 模块表不含 `zod`；Client 的 strict codec 必须手写 `typeSymbol`/`create`，不能 `require('zod')`（0.2.2 修复，并加 vm 加载测试）。
+9. 资源地址必须是 `dsh-resource://<protocol>/…`，不能自定义 `<protocol>://`；`useResource` 只认前者（0.2.3 修复）。
 
 ## 实施状态
 
