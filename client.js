@@ -15,6 +15,26 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
+    /**
+     * Optional platform modules: a specifier the page module table does not
+     * seed degrades the drawer instead of failing the whole Client entry
+     * (the 0.2.2 `zod` lesson). Every shipped sidebar bundle already resolves
+     * both of these, so in practice they are present.
+     */
+    const optionalRequire = (specifier) => {
+      try { return require(specifier) } catch (_error) { return undefined }
+    }
+    const Primitives = optionalRequire('@deepseek-ai/dsh-client-ui-primitives')
+    const WorkspacePath = optionalRequire('@deepseek-ai/dsh-util-workspace-path')
+    // NB: MarkdownText is a React.memo object, not a plain function.
+    const MarkdownText = Primitives !== undefined && Primitives !== null
+      && Primitives.MarkdownText !== undefined && Primitives.MarkdownText !== null
+      ? Primitives.MarkdownText
+      : undefined
+    const fileAddressFor = WorkspacePath !== undefined && typeof WorkspacePath.fileAddressFor === 'function'
+      ? WorkspacePath.fileAddressFor
+      : undefined
+
     const PLUGIN_ID = 'dsh-plan-guard'
     const TAB_KIND = 'plan-guard-drawer'
     const LOCALE_NS = 'plan-guard'
@@ -82,6 +102,10 @@ window.__ModuleLoader__.load({
         'items.mountHint': 'Mount this item',
         'items.unmountHint': 'Unmount this item',
         'items.contentError': 'This content could not be read:',
+        'items.openViewer': 'Open in viewer',
+        'markdown.copy': 'Copy',
+        'markdown.copied': 'Copied',
+        'markdown.footnotes': 'Footnotes',
         'add.note': 'Add note',
         'add.file': 'Add file',
         'add.noteTitle': 'Title',
@@ -150,6 +174,10 @@ window.__ModuleLoader__.load({
         'items.mountHint': '挂载这个条目',
         'items.unmountHint': '卸载这个条目',
         'items.contentError': '无法读取该内容：',
+        'items.openViewer': '在阅览器中打开',
+        'markdown.copy': '复制',
+        'markdown.copied': '已复制',
+        'markdown.footnotes': '脚注',
         'add.note': '添加备注',
         'add.file': '添加文件',
         'add.noteTitle': '标题',
@@ -826,7 +854,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ItemRow({ item, busy, expanded, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, t }) {
+    function ItemRow({ item, busy, expanded, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, onOpenViewer, t }) {
       const stateLabel = item.mounted ? t('items.mounted') : t('items.unmounted')
       const meta = t('items.meta')
         .replace('{kind}', item.kind === 'file' ? t('items.kindFile') : t('items.kindNote'))
@@ -852,6 +880,10 @@ window.__ModuleLoader__.load({
               'aria-pressed': item.locked,
               onClick: () => onLock(!item.locked),
             }, item.locked ? t('items.unlock') : t('items.lock')),
+            onOpenViewer === undefined ? null : h('button', {
+              type: 'button', className: 'pg-btn', disabled: busy,
+              onClick: onOpenViewer,
+            }, t('items.openViewer')),
             deleteConfirm
               ? h(React.Fragment, null,
                 h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onConfirmDelete }, t('items.deleteConfirm')),
@@ -862,7 +894,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ContentBlock({ content, t }) {
+    function ContentBlock({ content, t, markdown }) {
       if (content === undefined || content.status === 'loading') {
         return h('p', { className: 'pg-empty' }, t('content.loading'))
       }
@@ -877,15 +909,21 @@ window.__ModuleLoader__.load({
       const meta = [value.kind, value.title, value.truncated === true ? t('content.truncated') : undefined]
         .filter(part => typeof part === 'string' && part !== '')
         .join(' · ')
+      const text = String(value.text ?? '')
+      // The shared GFM renderer the built-in document viewer uses; without
+      // the primitives module this stays the plain-text fallback.
+      const rendered = markdown !== undefined && text !== ''
+        ? h(markdown.Text, { text, streaming: false, labels: markdown.labels, variant: 'compact' })
+        : h('pre', { className: 'pg-doc' }, text)
       return h('div', { className: 'pg-body' },
         meta === '' ? null : h('div', { className: 'pg-meta' }, meta),
-        h('pre', { className: 'pg-doc' }, String(value.text ?? '')),
+        rendered,
       )
     }
 
     /** The drawer body: permission mode, plans, items, add forms, previews. */
     function Drawer(props) {
-      const { sessionId, useResource, t, api } = props
+      const { sessionId, useResource, t, api, useTabInfo } = props
       const resource = useResource(drawerAddress(sessionId))
       const [state, setState] = React.useState(undefined)
       const [busy, setBusy] = React.useState(undefined)
@@ -897,6 +935,33 @@ window.__ModuleLoader__.load({
       const [noteText, setNoteText] = React.useState('')
       const [filePath, setFilePath] = React.useState('')
       const [deleteConfirm, setDeleteConfirm] = React.useState(undefined)
+
+      // The shared markdown chrome, memoized per locale: MarkdownText keeps a
+      // streaming render cache keyed off the labels identity.
+      const markdown = React.useMemo(() => (
+        MarkdownText === undefined
+          ? undefined
+          : {
+              Text: MarkdownText,
+              labels: {
+                code: { copyLabel: t('markdown.copy'), copiedLabel: t('markdown.copied') },
+                footnotes: t('markdown.footnotes'),
+              },
+            }
+      ), [t])
+
+      // The tab slot hands every body a `useTabInfo` hook (same as FilesBody); its
+      // `tab.actions.openResource` lands a file address in the built-in
+      // document viewer. Without the hook or the address helper there is no
+      // viewer button, only the inline preview.
+      const tabInfo = typeof useTabInfo === 'function' ? useTabInfo() : undefined
+      const viewerOpen = tabInfo !== undefined && tabInfo.tab !== undefined && tabInfo.tab.actions !== undefined
+        && typeof tabInfo.tab.actions.openResource === 'function' && fileAddressFor !== undefined
+        ? tabInfo.tab.actions.openResource.bind(tabInfo.tab.actions)
+        : undefined
+      const openInViewer = viewerOpen === undefined
+        ? undefined
+        : (path) => { viewerOpen(fileAddressFor(sessionId, undefined, path)) }
 
       React.useEffect(() => {
         if (resource.status === 'live') setState(unwrapFrame(resource.value))
@@ -1001,6 +1066,10 @@ window.__ModuleLoader__.load({
         },
         onCancelDelete: () => setDeleteConfirm(undefined),
         onExpand: () => { void onExpand(item.id) },
+        onOpenViewer: openInViewer === undefined || item.kind !== 'file'
+          || item.path === null || item.path === undefined
+          ? undefined
+          : () => { openInViewer(item.path) },
       }))
 
       const addForm = addKind === 'note'
@@ -1073,7 +1142,7 @@ window.__ModuleLoader__.load({
           ),
           plans.length === 0 ? h('p', { className: 'pg-empty' }, t('plans.empty')) : planRows,
           expanded !== undefined && plans.some(plan => plan.callId === expanded)
-            ? h(ContentBlock, { content, t })
+            ? h(ContentBlock, { content, t, markdown })
             : null,
         ),
         h('section', { className: 'pg-section' },
@@ -1084,7 +1153,7 @@ window.__ModuleLoader__.load({
           ),
           items.length === 0 ? h('p', { className: 'pg-empty' }, t('items.empty')) : itemRows,
           expanded !== undefined && items.some(item => item.id === expanded)
-            ? h(ContentBlock, { content, t })
+            ? h(ContentBlock, { content, t, markdown })
             : null,
           addForm,
         ),
@@ -1155,7 +1224,7 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'],
-      __testables: { drawerAddress, sessionIdOfAddress },
+      __testables: { drawerAddress, sessionIdOfAddress, ContentBlock, ItemRow },
       /** Mount the Remote namespace, then join the UI once that namespace is readable. */
       async apply(ctx) {
         const disposeRemote = await ctx.remote.$mount(remoteContribution)

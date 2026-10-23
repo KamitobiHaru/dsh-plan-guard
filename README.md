@@ -10,7 +10,7 @@
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.5.2 状态**：Host/Client 实现与 43 个测试已完成；已在临时安装的 `dsh web` 里用无头 Chrome 验收抽屉（浅色/深色）与真实模型回合的三条注入（快照 / 新增增量 / 卸载一行）。未覆盖项见「[已知限制](#已知限制)」。0.5.2 只修抽屉纵向滚动，需重启 `dsh web` 生效。
+> **v0.6.0 状态**：Host/Client 实现与 44 个测试已完成；已在临时安装的 `dsh web` 里用无头 Chrome 验收抽屉（浅色/深色）与真实模型回合的三条注入（快照 / 新增增量 / 卸载一行）。未覆盖项见「[已知限制](#已知限制)」。0.6.0 是抽屉预览 markdown 化 + 文件项一键进阅览器，需重启 `dsh web` 生效。
 
 ## 工作原理
 
@@ -124,7 +124,7 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 前置：可用的 DSH（开发验证于 `0.2.1-rc.2` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.5.2
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.6.0
 
 **方式一：命令行** —— 上面的命令。
 
@@ -168,10 +168,14 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（43 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（44 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染与降级。
 - **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.5.0` ↔ `v0.5.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在 pre-step 只追加注入消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.6.0` 抽屉预览 markdown 渲染 + 文件项一键进自带阅览器
+
+纯 Client 改动，Host 不动。展开 plan/备注/文件时，内容区改用共享组件 `MarkdownText`（`dsh-client-ui-primitives`，正是文档阅览器用的 GFM + TeX 渲染，自动去掉 raw HTML 与不安全协议）渲染，`compact` 变体适配抽屉窄栏；文件行多一个"在阅览器中打开"按钮，经 tab slot 的 `useTabInfo` → `tab.actions.openResource(fileAddressFor(sessionId, undefined, item.path))` 在侧边栏开内置文档 tab。自带阅览器只认 `dsh-resource://file/**` 文件地址，plan/备注是虚拟文本所以只做内联渲染（不写临时文件、不污染工作区）。新增的两个 require 都有多个 shipped bundle 在用，工厂里 `try/catch` 可选加载——缺包时退回纯文本 `<pre>`、无按钮，抽屉不白屏。
 
 ### `0.5.1` 修复 v4 日志下 verdict 折叠（拒绝的 plan 真的不再 mount）
 

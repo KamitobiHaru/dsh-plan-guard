@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { test } from 'node:test'
 
 /** Load the browser module the way the Client module table would. */
-async function loadClientModule() {
+async function loadClientModule(seeded = {}) {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   let entry
   const window = {
@@ -35,8 +35,13 @@ async function loadClientModule() {
   vm.runInContext(source, vm.createContext({ window, console, document }), { filename: 'client.js' })
   assert.equal(entry?.id, 'dsh-plan-guard')
 
+  const elements = []
   const React = {
-    createElement: () => null,
+    createElement: (type, props, ...children) => {
+      const element = { type, props: props ?? {}, children }
+      elements.push(element)
+      return element
+    },
     useState: value => [value, () => {}],
     useEffect: () => {},
     useRef: value => ({ current: value }),
@@ -48,9 +53,10 @@ async function loadClientModule() {
   const module = entry.factory((specifier) => {
     required.push(specifier)
     if (specifier === 'react') return React
+    if (Object.hasOwn(seeded, specifier)) return seeded[specifier]
     throw new Error(`client module required an unseeded module: ${specifier}`)
   })
-  return { module, required, head }
+  return { module, required, head, elements }
 }
 
 /** Minimal Client context: enough of the registration surface for apply(). */
@@ -112,7 +118,9 @@ function assertStrictCodec(codec, subject) {
 
 test('client module imports only seeded modules and mounts valid descriptors', async () => {
   const { module, required, head } = await loadClientModule()
-  assert.deepEqual(required, ['react'])
+  // The two platform modules are attempted and, unseeded here, degrade to the
+  // plain-text preview without failing the entry (the try/catch in factory).
+  assert.deepEqual(required, ['react', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-util-workspace-path'])
   assert.deepEqual([...module.inject], ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'])
 
   // Resource addresses must use the platform scheme; `<protocol>://` is not a
@@ -201,4 +209,65 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.equal(captured.uiDisposed, true, 'the returned disposer drops the UI half')
   for (const dispose of captured.effects.reverse()) await dispose()
   assert.equal(head.children.length, 0, 'unloading removes the stylesheet')
+})
+
+/** Flatten recorded elements (arrays, component props excluded) for assertions. */
+function flatElements(node, out = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) flatElements(child, out)
+    return out
+  }
+  if (node !== null && typeof node === 'object' && 'type' in node) {
+    out.push(node)
+    flatElements(node.children, out)
+  }
+  return out
+}
+
+const viewerButtonOf = (tree) => flatElements(tree).filter(
+  node => node.type === 'button' && Array.isArray(node.children) && node.children.includes('items.openViewer'),
+)
+
+test('preview renders shared markdown when available and plain text otherwise', async () => {
+  const MarkdownText = () => null
+  const seeded = await loadClientModule({
+    '@deepseek-ai/dsh-client-ui-primitives': { MarkdownText },
+    '@deepseek-ai/dsh-util-workspace-path': { fileAddressFor: (sessionId, cwd, path) => `addr:${sessionId}:${path}` },
+  })
+  assert.deepEqual(seeded.required, ['react', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-util-workspace-path'])
+  const { ContentBlock, ItemRow } = seeded.module.__testables
+  const t = key => key
+  const ready = {
+    id: 'x',
+    status: 'ready',
+    value: { kind: 'note', title: 'T', text: '# Hi\nbody', truncated: false },
+  }
+  const markdown = {
+    Text: MarkdownText,
+    labels: { code: { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' },
+  }
+
+  const rendered = ContentBlock({ content: ready, t, markdown })
+  const md = flatElements(rendered).filter(node => node.type === MarkdownText)
+  assert.equal(md.length, 1, 'the shared renderer owns the preview body')
+  assert.equal(md[0].props.text, '# Hi\nbody')
+  assert.equal(md[0].props.streaming, false)
+  assert.equal(md[0].props.variant, 'compact')
+  assert.deepEqual(md[0].props.labels, markdown.labels)
+  assert.equal(flatElements(rendered).filter(node => node.type === 'pre').length, 0)
+
+  const fallback = ContentBlock({ content: ready, t, markdown: undefined })
+  assert.equal(flatElements(fallback).filter(node => node.type === 'pre').length, 1)
+  assert.equal(flatElements(fallback).filter(node => node.type === MarkdownText).length, 0)
+
+  const fileItem = {
+    kind: 'file', id: 'file:/a.md', title: 'a.md', path: '/repo/a.md',
+    mounted: true, locked: false, createdBy: 'human', size: 3,
+  }
+  const rowProps = {
+    item: fileItem, busy: false, expanded: false, deleteConfirm: false,
+    onToggle() {}, onLock() {}, onDelete() {}, onConfirmDelete() {}, onCancelDelete() {}, onExpand() {}, t,
+  }
+  assert.equal(viewerButtonOf(ItemRow({ ...rowProps, onOpenViewer: undefined })).length, 0)
+  assert.equal(viewerButtonOf(ItemRow({ ...rowProps, onOpenViewer() {} })).length, 1)
 })
