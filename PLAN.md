@@ -30,7 +30,7 @@
 1. 外部 plain-JS profile 插件可直接 `ctx.tools.register(手写对象)`：`parameters` 是普通 JSON Schema，不需要 zod/defineTool；框架**不校验参数**，工具自己校验。
 2. 工具全局注册；子代理用 `agent/created` + `agent.ctx.tools.restrict` 隐藏，执行时 `ctx.agents.roots()` 兜底。
 3. `ctx.userQuestions.askTimed` 是带自定义选项的阻塞问题通道，不依赖 approval policy；本会话 `never` 下可用。
-4. `ctx.storageDomain` 表 API 是 `put/update/delete/get`，**没有 `set`**；旧代码的 `.set` 已修正。
+4. `ctx.storageDomain` 表 API 是 `put/update/delete/get`，**没有 `set`**；旧代码的 `.set` 已修正。domain 名必须匹配 `^[a-z][a-z0-9_]*$`：0.2.0 的 `plan-guard` 导致激活失败，0.2.1 改为 `plan_guard`，并加回归测试。
 5. `ctx.fs` 提供 `resolve/stat/streamText/contains/processPath`；`ctx.workingDirectory.ensure(agent)` 给会话 cwd；读取在 pre-step 是官方模式（agent-instructions 同款）。
 6. 注入：`agent/pre-step` 瀑布 `await next()` 后 splice 一条 user 消息，agent-loop 落事件（模型可见 ⟺ 已记录）。
 7. 与 `dsh-compaction-tune` 零交集：不改压缩配置/预设，只读会话事件与 storage。
@@ -40,7 +40,7 @@
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（20 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（21 个用例通过）
 - [x] `node --check index.js/client.js`
 - [ ] 安装与活会话验收（发布前未做：只完成静态检查与单元测试）
 
@@ -71,7 +71,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（20/20）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（21/21）。
 - 未跑：安装、`dsh web` 重启、真实注入、抽屉渲染、问题卡片、压缩矩阵。
 - 后续：`plugin_manager install_bundle` → 重启 → `cordis_inspect_query` Tool/Slots →
   抽屉矩阵 → 工具权限矩阵 → `dsh-compaction-tune` 强制压缩（`set-ratio.mjs 0.01 --retain 0.0005`，测试后恢复）→ 重启/恢复自愈。

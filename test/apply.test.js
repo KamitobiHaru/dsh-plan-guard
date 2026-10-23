@@ -74,7 +74,7 @@ function fakeContext() {
   }
   const ctx = {
     storageDomain: {
-      async open(spec) { assert.equal(spec.name, 'plan-guard'); return domain },
+      async open(spec) { assert.equal(spec.name, 'plan_guard'); return domain },
     },
     sessionProjections: {
       register(spec) { applied.push(spec); return () => {} },

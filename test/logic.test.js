@@ -255,3 +255,11 @@ test('notes and titles normalize predictably', () => {
   assert.equal(t.titleFromText('\n\n  first line  \nsecond'), 'first line')
   assert.equal(t.titleFromText('   '), 'Note')
 })
+
+test('storage domain and table names satisfy the storage unit rule', () => {
+  // `dsh-storage` requires every unit and table name to match this pattern;
+  // a hyphen makes `storageDomain.open` throw during plugin activation.
+  const unitName = /^[a-z][a-z0-9_]*$/
+  assert.match(t.GUARD_DOMAIN_NAME, unitName)
+  for (const table of Object.keys(t.guardDomainSpec.tables)) assert.match(table, unitName)
+})

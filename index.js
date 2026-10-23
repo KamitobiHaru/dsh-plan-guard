@@ -28,7 +28,7 @@ export const PLAN_DOCS_PROJECTION_KEY = 'plan-guard-docs'
 /** Cordis service key this plugin provides; also the wire namespace. */
 export const SERVICE_KEY = 'plan-guard'
 /** Storage domain this plugin owns. */
-export const GUARD_DOMAIN_NAME = 'plan-guard'
+export const GUARD_DOMAIN_NAME = 'plan_guard'
 /** Merge-extensible MessageSourceMap `kind` (consumers fall through unknown kinds). */
 export const SOURCE_KIND = 'plan-guard'
 /** Model-facing tool name. */
@@ -1491,6 +1491,8 @@ export const __testables = {
   POLICIES,
   PLAN_CHOICES,
   TOOL_ACTIONS,
+  GUARD_DOMAIN_NAME,
+  guardDomainSpec,
   validateConfig,
   normalizeRecord,
   effectivePlanState,

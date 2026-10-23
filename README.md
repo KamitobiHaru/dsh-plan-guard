@@ -8,7 +8,7 @@
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.2.0 状态**：Host/Client 实现与 20 个测试已完成；尚未在真实安装的会话中验收注入、抽屉与问题卡片，未覆盖项见「[已知限制](#已知限制)」。
+> **v0.2.1 状态**：Host/Client 实现与 21 个测试已完成；尚未在真实安装的会话中验收注入、抽屉与问题卡片，未覆盖项见「[已知限制](#已知限制)」。
 
 ## 工作原理
 
@@ -107,7 +107,7 @@ item: file:...
 
 前置：可用的 DSH（开发验证于 `0.2.1-rc.2` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.2.0
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.2.1
 
 **方式一：命令行** —— 上面的命令。
 
@@ -131,7 +131,7 @@ item: file:...
 
 ## 已知限制
 
-- **尚未做安装后的活会话验收**：v0.2.0 只跑了 `node --check`、20 个纯逻辑/假 ctx 测试，以及安装版工具 schema 校验。真实会话里的注入、抽屉渲染、问题卡片、权限门控、压缩后的幂等性都还没有在真实安装上跑过。
+- **尚未做安装后的活会话验收**：v0.2.1 只跑了 `node --check`、21 个纯逻辑/假 ctx 测试，以及安装版工具 schema 校验。真实会话里的注入、抽屉渲染、问题卡片、权限门控、压缩后的幂等性都还没有在真实安装上跑过。
 - **抽屉只读活会话**：会话未恢复时显示提示，不能编辑；归档会话的读取（projection `wire.view`）未做。
 - **注入只在压缩后发生**：两次压缩之间的人类挂载/卸载不会改当前 surface，抽屉文案已说明。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
@@ -150,10 +150,14 @@ item: file:...
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（20 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.2.0` ↔ `v0.2.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（21 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.2.1` ↔ `v0.2.1`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在压缩后追加一条消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.2.1` 修复激活失败
+
+`dsh-storage` 要求 domain / table 名匹配 `^[a-z][a-z0-9_]*$`。0.2.0 用了 `plan-guard`，`storageDomain.open` 在启动时抛 `StorageError: invalid unit name 'plan-guard'`，整个插件条目不激活（`dsh web` 日志里的 “1 entry did not activate”）。0.2.1 把 domain 名改为 `plan_guard`；0.2.0 从未成功打开过该 domain，所以没有数据需要迁移。发版前已在临时 `DSH_HOME` 里安装本地目录并真实启动 `dsh web`，确认不再出现激活警告。
 
 ## License
 
