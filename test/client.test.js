@@ -139,6 +139,13 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.match(head.children[0].textContent, /--dsw-alias-interactive-bg-hover/)
   assert.ok(!head.children[0].textContent.includes('.pg-select'), 'the native select is gone')
   assert.ok(!head.children[0].textContent.includes('appearance: none'), 'no OS-popup styling hack remains')
+  // The host tab body is height:100% + overflow:hidden, so the drawer root
+  // must fill it and scroll itself (files-tab recipe); otherwise tall content
+  // is clipped with no scrollbar.
+  assert.match(head.children[0].textContent, /\.pg-root\s*\{[^}]*flex:\s*auto[^}]*\}/)
+  assert.match(head.children[0].textContent, /\.pg-root\s*\{[^}]*min-height:\s*0[^}]*\}/)
+  assert.match(head.children[0].textContent, /\.pg-root\s*\{[^}]*overflow:\s*auto[^}]*\}/)
+  assert.match(head.children[0].textContent, /\.pg-root\s*\{[^}]*scrollbar-gutter:\s*stable[^}]*\}/)
   assert.ok(!('policy.hint' in captured.locale.dictionaries), 'the drawer carries no instructional copy')
   assert.ok(!('compaction.hint' in captured.locale.dictionaries))
 

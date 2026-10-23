@@ -180,6 +180,14 @@ window.__ModuleLoader__.load({
   flex-direction: column;
   gap: 18px;
   min-width: 0;
+  /* The host tab body is height:100% with overflow:hidden, so the tab content
+  owns its scrolling (same recipe as the files tab: fill, shrink, native
+  scrollbar with a stable gutter). Without this the pane clips and no
+  scrollbar ever appears. */
+  flex: auto;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
   padding: 12px 14px 24px;
   color: var(--dsw-alias-label-primary, inherit);
   font: var(--dsw-font-xs-13);

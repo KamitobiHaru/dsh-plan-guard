@@ -10,7 +10,7 @@
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.5.1 状态**：Host/Client 实现与 43 个测试已完成；已在临时安装的 `dsh web` 里用无头 Chrome 验收抽屉（浅色/深色）与真实模型回合的三条注入（快照 / 新增增量 / 卸载一行）。未覆盖项见「[已知限制](#已知限制)」。0.5.1 只修 verdict 折叠（v4 嵌套 `data.message`），需重启 `dsh web` 生效。
+> **v0.5.2 状态**：Host/Client 实现与 43 个测试已完成；已在临时安装的 `dsh web` 里用无头 Chrome 验收抽屉（浅色/深色）与真实模型回合的三条注入（快照 / 新增增量 / 卸载一行）。未覆盖项见「[已知限制](#已知限制)」。0.5.2 只修抽屉纵向滚动，需重启 `dsh web` 生效。
 
 ## 工作原理
 
@@ -124,7 +124,7 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 前置：可用的 DSH（开发验证于 `0.2.1-rc.2` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.5.1
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.5.2
 
 **方式一：命令行** —— 上面的命令。
 
@@ -176,6 +176,10 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 ### `0.5.1` 修复 v4 日志下 verdict 折叠（拒绝的 plan 真的不再 mount）
 
 0.4.0–0.5.0 的 verdict 分支读扁平 `data.toolCallId` / `data.isError`，但 v4 会话日志里 `tool/result` 把结论包在 `data.message` 里（`{turn, step, message: {toolCallId, content, isError, …}}`），顶层没有这两个字段——生产环境里结论从未折叠成功，被拒的 plan 照样自动挂载（本会话 seq 2382/2383/2386 实证；0.3.1 被拒计划在 seq 1547 被注入是同一病因）。0.5.1 先读 `data.message`、缺失回退扁平形状（兼容旧日志与旧测试），接受/拒绝判定逻辑不变，复合 id（`call_X|fc_X`）两侧逐字相同、严格相等即可匹配。投影 `stateVersion 2 → 3`，重启后旧缓存重折、历史结论一次性结算；storage 记录结构不变（仍是 version 2）。
+
+### `0.5.2` 修复抽屉无纵向滚动条
+
+宿主 tab 体是 `height: 100%` + `overflow: hidden`（`dsh-client-ui-sidebar-right` 实证），内容区必须自己滚动——之前 `.pg-root` 没有高度约束也没有 overflow，超长直接被裁掉且永远不出滚动条。照抄 files tab 的配方：`flex: auto` 撑满 + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`，滚动条就是原生/自带的那个，不自绘。
 
 ### `0.5.0` 新自动计划顶掉旧自动计划 + 权限下拉原生菜单化
 

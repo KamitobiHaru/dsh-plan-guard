@@ -34,6 +34,7 @@
 12. 工具描述带一句引导模型主动持久化（facts/decisions/WIP → `add_note`/`add_file`），约 30 token，可删。
 13. 新自动计划顶掉上一个自动计划：只算自动的（人类显式选择不碰）、pinned 不算（只写 `plan:` 键）、新增与顶掉走内部 op 不问权限；不写显式 `unmounted`，保持 auto-following（"恢复自动"语义不变）。
 14. 原生 `<select>` 的弹窗 OS 渲染、CSS 够不着：权限下拉自绘（button + 弹窗），照抄官方 Menu token（`menu-surface-fill`/`elevation-prominent`/34px 行/hover=focus 填充/尾部对勾），不新增 require。
+15. 宿主 tab 体（`dsh-client-ui-sidebar-right`：`height: 100%` + `overflow: hidden`）不滚动，内容区必须自滚动：`.pg-root` 照抄 files tab 配方（`flex: auto` + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`），滚动条用原生的，不自绘。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -84,6 +85,7 @@
 - [x] 0.5.0：`syncAutoPlans` 自动顶替（记录 `autoPlan` 字段、新 auto 记 added、旧 auto 记 removed 一行），
       权限下拉自绘原生菜单化（`pg-menu*` 四类 + 内联 chevron/check、无新增 require）
 - [x] 0.5.1：verdict 折叠兼容 v4 嵌套形状（先读 `data.message`、回退扁平，`stateVersion 2 → 3`），43/43 测试
+- [x] 0.5.2：抽屉自滚动（`.pg-root` 照抄 files tab：`flex: auto` + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`），43/43 测试
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
