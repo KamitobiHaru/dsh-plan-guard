@@ -109,6 +109,7 @@ const cloneRecord = (record) => ({
   plans: { ...record.plans },
   items: { ...record.items },
   pending: clonePending(record.pending),
+  autoPlan: isNonEmptyString(record.autoPlan) ? record.autoPlan : null,
 })
 
 /**
@@ -429,7 +430,11 @@ export function normalizeRecord(raw) {
     if (!isRecord(raw.items)) throw new Error('plan-guard items are not an object')
     for (const [id, item] of Object.entries(raw.items)) items[id] = normalizeItemStrict(id, item)
   }
-  return { version: 2, policy, plans, items, pending: normalizePending(raw.pending) }
+  // Bookkeeping for auto-displacement: which auto-mounted plan the journal
+  // already accounts for. Lenient on purpose — a corrupt value just resets to
+  // "unknown", which re-journals at most one incremental message.
+  const autoPlan = isNonEmptyString(raw.autoPlan) ? raw.autoPlan : null
+  return { version: 2, policy, plans, items, pending: normalizePending(raw.pending), autoPlan }
 }
 
 const guardRecordSchema = { parse(value) { return normalizeRecord(value) } }
@@ -446,7 +451,7 @@ const guardDomainSpec = {
 function readRecord(domain, config, sessionId) {
   const raw = domain.table('sessions').get(String(sessionId))
   if (raw === undefined) {
-    return { version: 2, policy: config.defaultPolicy, plans: {}, items: {}, pending: emptyPending() }
+    return { version: 2, policy: config.defaultPolicy, plans: {}, items: {}, pending: emptyPending(), autoPlan: null }
   }
   return {
     version: 2,
@@ -454,6 +459,7 @@ function readRecord(domain, config, sessionId) {
     plans: raw.plans ?? {},
     items: raw.items ?? {},
     pending: clonePending(raw.pending),
+    autoPlan: isNonEmptyString(raw.autoPlan) ? raw.autoPlan : null,
   }
 }
 
@@ -488,6 +494,43 @@ export function effectivePlanState(doc, index, docs, record, config, sawCompacti
     auto: mounted,
     autoEligible,
     awaitingCompaction: autoEligible && sawCompaction !== true,
+  }
+}
+
+/**
+ * Reconcile the auto-mounted plan against what the journal already accounts
+ * for. Pure: returns `{ autoPlan, addPlan, removePlan }`, or undefined when
+ * the recorded `autoPlan` already matches the derived auto-mounted plan.
+ *
+ * The predicate is exactly `effectivePlanState(...).auto`, so this agrees
+ * with every other reader about what "auto-mounted" means. Only
+ * auto-following plans are ever displaced: a plan the human explicitly
+ * mounted or unmounted is left untouched, and pinned notes/files are out of
+ * scope (only `plan:` journal keys are written).
+ */
+export function planAutoTransition(docs, record, config, sawCompaction) {
+  let autoNow = null
+  for (let index = 0; index < docs.length; index += 1) {
+    const doc = docs[index]
+    if (effectivePlanState(doc, index, docs, record, config, sawCompaction).auto === true) {
+      autoNow = doc
+      break // at most one: auto requires isLatest
+    }
+  }
+  const autoPrev = isNonEmptyString(record.autoPlan) ? record.autoPlan : null
+  const nowId = autoNow === null ? null : autoNow.callId
+  if (nowId === autoPrev) return undefined
+  let removePlan = null
+  if (autoPrev !== null) {
+    const prevDoc = docs.find(doc => doc.callId === autoPrev)
+    if (prevDoc !== undefined && record.plans[autoPrev] === undefined) {
+      removePlan = { id: autoPrev, label: prevDoc.title }
+    }
+  }
+  return {
+    autoPlan: nowId,
+    addPlan: autoNow === null ? null : { id: autoNow.callId, label: autoNow.title },
+    removePlan,
   }
 }
 
@@ -1144,11 +1187,34 @@ function createOperations(ctx, domain, projections, sessions, config) {
     })
   }
 
+  /**
+   * Internal bookkeeping, deliberately permission-free (like markInjected):
+   * the auto-mount rule itself never asks, so accounting for its transitions
+   * must not ask either. Journals the new auto plan's addition (full text next
+   * step) and the displaced auto plan's removal (one line); explicit human
+   * choices are never touched. Returns the post-write record so the caller
+   * continues the step with fresh pending.
+   */
+  const syncAutoPlans = (sessionId, docs, sawCompaction) => mutate(sessionId, (current) => {
+    const transition = planAutoTransition(docs, current, config, sawCompaction)
+    if (transition === undefined) return undefined
+    const next = cloneRecord(current)
+    next.autoPlan = transition.autoPlan
+    if (transition.addPlan !== null) {
+      journal(next, 'added', `plan:${transition.addPlan.id}`, 'plan', transition.addPlan.id, transition.addPlan.label)
+    }
+    if (transition.removePlan !== null) {
+      journal(next, 'removed', `plan:${transition.removePlan.id}`, 'plan', transition.removePlan.id, transition.removePlan.label)
+    }
+    return next
+  })
+
   return {
     config,
     read,
     state,
     markInjected,
+    syncAutoPlans,
     setPolicy,
     setPlan,
     prepareFile,
@@ -1479,17 +1545,25 @@ function createInjector(ctx, projections, config, operations) {
     try {
       const sessionId = agent.session?.id
       if (sessionId === undefined) return decision
-      const record = operations.read(sessionId)
+      const projected = projections.stateOf(agent.session, PLAN_DOCS_PROJECTION_KEY)
+      const docs = projected?.docs ?? []
+      const sawCompaction = projected?.sawCompaction === true
+      // Account for auto-mount transitions before anything else: a newly
+      // auto-mounted plan journals its addition and displaces the previous
+      // auto plan with a one-line notice. The pure pre-check keeps the common
+      // no-change step free of a storage round-trip; on change the fresh
+      // record continues this step so the displacement delivers immediately.
+      let record = operations.read(sessionId)
+      if (planAutoTransition(docs, record, config, sawCompaction) !== undefined) {
+        record = (await operations.syncAutoPlans(sessionId, docs, sawCompaction)).record
+      }
       const pending = record.pending ?? emptyPending()
       const keys = pendingKeys(pending)
       const visible = injectionVisible(agent, decision)
       if (visible && keys.length === 0) return decision
 
-      const projected = projections.stateOf(agent.session, PLAN_DOCS_PROJECTION_KEY)
-      const docs = projected?.docs ?? []
-      const sawCompaction = projected?.sawCompaction === true
-
       if (!visible) {
+        signal?.throwIfAborted?.()
         const mountedItems = Object.values(record.items).filter(item => item.mounted === true)
         let composed
         if (docs.length > 0 || mountedItems.length > 0) {
@@ -1761,6 +1835,7 @@ export const __testables = {
   validateConfig,
   normalizeRecord,
   effectivePlanState,
+  planAutoTransition,
   authorizeModelAction,
   validateToolArgs,
   composeGuardText,

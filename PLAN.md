@@ -32,6 +32,8 @@
 10. 被拒的计划只展示、不自动挂载：接受/拒绝结论以 `tool/result` 的 `toolCallId` + `isError` 为准（不硬匹配英文文案）；显式的人类挂载选择永远优先。
 11. 卸载通知带标题和唯一编号（与正文段的 `item: <id>` 对应）；id 缺失时降级为纯标题。
 12. 工具描述带一句引导模型主动持久化（facts/decisions/WIP → `add_note`/`add_file`），约 30 token，可删。
+13. 新自动计划顶掉上一个自动计划：只算自动的（人类显式选择不碰）、pinned 不算（只写 `plan:` 键）、新增与顶掉走内部 op 不问权限；不写显式 `unmounted`，保持 auto-following（"恢复自动"语义不变）。
+14. 原生 `<select>` 的弹窗 OS 渲染、CSS 够不着：权限下拉自绘（button + 弹窗），照抄官方 Menu token（`menu-surface-fill`/`elevation-prominent`/34px 行/hover=focus 填充/尾部对勾），不新增 require。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -57,13 +59,16 @@
 13. `exit_plan_mode` 的接受/拒绝写在 `tool/result` 里：同 `toolCallId`、`isError: true` + `Error: The user dismissed…`
     即拒绝，`isError: false` + `Plan approved…` 即接受，随后跟 `plan/mode {"active": false}`。
     本会话 seq 1007/1035/1037 与 seq 1543/1544 实证；被拒的 0.3.1 计划在 seq 1547 仍被注入——这正是 0.4.0 要修的 bug。
+14. plan 的 journal 只发生在人类显式翻转（`setPlan`）；自动翻转（新计划到来、`sawCompaction` 翻转）从不记 journal，
+    而 injector `visible && keys empty → return`，所以快照可见时新批准计划永不注入、旧计划也无 notice——
+    0.5.0 的 `syncAutoPlans` 补上这一环（新 auto 记 added、旧 auto 记 removed）。
 
 ## 实施状态
 
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（36 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（41 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
@@ -72,6 +77,8 @@
       `Note "E2E marker" (note:…) is no longer guarded.`，三次注入都不重复
 - [x] 0.4.0：被拒计划不自动挂载（投影 fold `tool/result`、`stateVersion 2`、抽屉/`list` 标记），
       快照头与工具描述去掉「每次压缩后重发」，卸载通知带编号，工具描述加主动持久化一句
+- [x] 0.5.0：`syncAutoPlans` 自动顶替（记录 `autoPlan` 字段、新 auto 记 added、旧 auto 记 removed 一行），
+      权限下拉自绘原生菜单化（`pg-menu*` 四类 + 内联 chevron/check、无新增 require）
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
@@ -81,9 +88,10 @@
    同 callId 的 `tool/result` 到达后记 `accepted`（`isError` 即拒）；
     首次成功 `compaction/end` 把 `sawCompaction` 置真。
 2. 抽屉/工具 → storage domain `plan_guard` 表 `sessions`，按 sessionId 一条记录：
-   `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}, pending:{added,removed}}`。
+   `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}, pending:{added,removed}, autoPlan:callId|null}`。
    每次改挂载状态都往 pending 记一条（按条目合并，add/remove 互相抵消）。
-3. pre-step：surface 上没有守护消息 → 取 projection + 记录 → 生效 Plan（最新自动：须压缩过、须通过；显式选择优先）
+3. pre-step：先跑 `syncAutoPlans`（纯 `planAutoTransition` + mutate；新 auto 记 added、旧 auto 记 removed，显式选择不碰）→
+   surface 上没有守护消息 → 取 projection + 记录 → 生效 Plan（最新自动：须压缩过、须通过；显式选择优先）
    + 已挂载条目 → 实时读文件（上限/标记）→ 拼快照并清 pending；
    否则若有 pending → 只拼增量（新增正文 / 卸载一行带编号）→ 发完按 key 清 pending。
    两种消息都 splice 在 `lastClaimed + 1`，即请求尾部。
@@ -106,7 +114,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（36/36）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（41/41）。
 - 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome（浅/深色截图、抽屉增删挂载、guide 图标、控制台零报错）。
 - 已跑：真实模型回合三条注入（快照 / 新增增量 / 卸载一行），直接读会话 jsonl 核对。
 - 未跑：压缩时刻、问题卡片、权限矩阵、重启/恢复自愈。

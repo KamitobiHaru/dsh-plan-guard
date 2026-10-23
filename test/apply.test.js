@@ -371,6 +371,48 @@ test('an incremental delivery carries the addition and one removal sentence', as
   assert.equal(idempotent.messages.length, 1, 'a delivered change is not repeated')
 })
 
+test('a newly auto-mounted plan displaces the previous auto plan', async () => {
+  const fake = await setup()
+  const planA = { callId: 'pA', title: 'Plan A', markdown: '# Plan A\nbody A', turn: 1, accepted: true }
+  const planB = { callId: 'pB', title: 'Plan B', markdown: '# Plan B\nbody B', turn: 2, accepted: true }
+  fake.setProjection({ docs: [planA], sawCompaction: true })
+  const first = await preStep(fake)
+  assert.equal(first.messages.length, 2)
+  assert.match(first.messages[1].content[0].text, /body A/)
+  surfaceVisible(fake, first.messages[1])
+
+  fake.setProjection({ docs: [planA, planB], sawCompaction: true })
+  const displaced = await preStep(fake, { turn: 2 })
+  assert.equal(displaced.messages.length, 2)
+  const text = displaced.messages[1].content[0].text
+  assert.match(text, /— update/)
+  assert.match(text, /## Plan: Plan B/)
+  assert.match(text, /body B/)
+  assert.match(text, /Plan "Plan A" \(pA\) is no longer guarded\./)
+  assert.ok(!text.includes('body A'), 'the displaced plan text is not re-sent')
+
+  const quiet = await preStep(fake, { turn: 3 })
+  assert.equal(quiet.messages.length, 1, 'a displacement delivers once')
+})
+
+test('a rejected newcomer displaces nobody and adds nothing', async () => {
+  const fake = await setup()
+  const planA = { callId: 'pA', title: 'Plan A', markdown: '# Plan A\nbody A', turn: 1, accepted: true }
+  fake.setProjection({ docs: [planA], sawCompaction: true })
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  fake.setProjection({
+    docs: [planA, { callId: 'pB', title: 'Plan B', markdown: '# Plan B\nbody B', turn: 2, accepted: false }],
+    sawCompaction: true,
+  })
+  const next = await preStep(fake, { turn: 2 })
+  assert.equal(next.messages.length, 2)
+  const text = next.messages[1].content[0].text
+  assert.ok(!text.includes('body B'), 'a rejected plan is never injected')
+  assert.match(text, /Plan "Plan A" \(pA\) is no longer guarded\./, 'the dead auto plan is still noticed')
+})
+
 test('a compaction re-injects what is still guarded and drops the rest', async () => {
   const fake = await setup()
   fake.setProjection({ docs: [], sawCompaction: true })

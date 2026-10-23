@@ -203,24 +203,115 @@ window.__ModuleLoader__.load({
   justify-content: space-between;
   gap: 12px;
 }
-.pg-select {
-  box-sizing: border-box;
-  height: 28px;
+.pg-policyMenu {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
   max-width: 62%;
-  padding: 0 26px 0 10px;
-  border: .5px solid var(--dsw-alias-border-l4);
-  border-radius: var(--dsw-radius-md);
-  background-color: var(--dsw-alias-bg-layer-1);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-position: right 9px center;
-  background-repeat: no-repeat;
-  background-size: 11px 11px;
-  color: var(--dsw-alias-label-primary, inherit);
-  font: inherit;
-  cursor: pointer;
-  appearance: none;
 }
-.pg-select:focus-visible,
+.pg-menuTrigger {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 4px 0 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+.pg-menuTrigger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.pg-menuTrigger:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
+}
+.pg-menuTriggerLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pg-menuTriggerIcon {
+  display: inline-flex;
+  flex: none;
+  color: var(--dsw-alias-label-caption);
+}
+.pg-menuTriggerIcon svg {
+  width: 14px;
+  height: 14px;
+  transition: transform .12s;
+}
+.pg-menuTriggerIconOpen svg {
+  transform: rotate(180deg);
+}
+.pg-menuList {
+  box-sizing: border-box;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  min-width: 144px;
+  max-width: 100%;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-menu-surface-fill, var(--dsw-alias-bg-layer-1));
+  backdrop-filter: var(--dsw-menu-backdrop-filter, none);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+.pg-menuItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+.pg-menuItem:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.pg-menuItem:focus-visible:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  outline: none;
+}
+.pg-menuItem:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.pg-menuItemLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pg-menuCheck {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.pg-menuTrigger:focus-visible,
 .pg-input:focus-visible,
 .pg-textarea:focus-visible,
 .pg-title:focus-visible,
@@ -585,6 +676,106 @@ window.__ModuleLoader__.load({
       ],
     }
 
+    /** Chevron-down and check glyphs, drawn in the row's own color. */
+    function ChevronDownIcon() {
+      return h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M3.5 5.25L7 8.75L10.5 5.25',
+          stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+        }))
+    }
+
+    function CheckIcon() {
+      return h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none', 'aria-hidden': 'true', className: 'pg-menuCheck' },
+        h('path', {
+          d: 'M2.8 7.4l2.8 2.8 5.6-6.4',
+          stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+        }))
+    }
+
+    /**
+     * Policy picker as a custom menu. A native `<select>` popup is rendered by
+     * the OS and cannot be styled; this popup follows the harness Menu recipe
+     * (card, hover fill, trailing check) through the same `--dsw-*` tokens.
+     * Arrow keys move real focus between rows, like the native menu.
+     */
+    function PolicyMenu({ policy, busy, onSelect, t }) {
+      const [open, setOpen] = React.useState(false)
+      const rootRef = React.useRef(null)
+      const triggerRef = React.useRef(null)
+      const itemRefs = React.useRef([])
+
+      React.useEffect(() => {
+        if (open !== true) return undefined
+        const onPointerDown = (event) => {
+          const root = rootRef.current
+          if (root !== null && root !== undefined && typeof root.contains === 'function'
+            && !root.contains(event.target)) {
+            setOpen(false)
+          }
+        }
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') {
+            setOpen(false)
+            const trigger = triggerRef.current
+            if (trigger !== null && trigger !== undefined && typeof trigger.focus === 'function') {
+              trigger.focus()
+            }
+          }
+        }
+        document.addEventListener('pointerdown', onPointerDown)
+        document.addEventListener('keydown', onKeyDown)
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown)
+          document.removeEventListener('keydown', onKeyDown)
+        }
+      }, [open])
+
+      const focusItem = (index) => {
+        const count = POLICY_OPTIONS.length
+        const wrapped = ((index % count) + count) % count
+        const node = itemRefs.current[wrapped]
+        if (node !== null && node !== undefined && typeof node.focus === 'function') node.focus()
+      }
+      const onItemKeyDown = (event, index) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); focusItem(index + 1) }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); focusItem(index - 1) }
+        else if (event.key === 'Home') { event.preventDefault(); focusItem(0) }
+        else if (event.key === 'End') { event.preventDefault(); focusItem(POLICY_OPTIONS.length - 1) }
+      }
+      const choose = (value) => {
+        setOpen(false)
+        if (value !== policy) onSelect(value)
+      }
+      const current = POLICY_OPTIONS.find(option => option.value === policy) ?? POLICY_OPTIONS[0]
+      return h('div', { className: 'pg-policyMenu', ref: rootRef },
+        h('button', {
+          type: 'button', ref: triggerRef, className: 'pg-menuTrigger',
+          disabled: busy === true, 'aria-haspopup': 'menu', 'aria-expanded': open,
+          'aria-label': t('policy.label'),
+          onClick: () => setOpen(!open),
+          onKeyDown: (event) => {
+            if ((event.key === 'ArrowDown' || event.key === 'Enter') && open !== true) {
+              event.preventDefault()
+              setOpen(true)
+            }
+          },
+        },
+        h('span', { className: 'pg-menuTriggerLabel' }, t(current.key)),
+        h('span', { className: 'pg-menuTriggerIcon' + (open === true ? ' pg-menuTriggerIconOpen' : '') }, h(ChevronDownIcon, null))),
+        open !== true ? null : h('div', { className: 'pg-menuList', role: 'menu', 'aria-label': t('policy.label') },
+          POLICY_OPTIONS.map((option, index) => h('button', {
+            type: 'button', key: option.value, role: 'menuitem',
+            className: 'pg-menuItem', disabled: busy === true,
+            ref: (node) => { itemRefs.current[index] = node },
+            onClick: () => choose(option.value),
+            onKeyDown: (event) => onItemKeyDown(event, index),
+          },
+          h('span', { className: 'pg-menuItemLabel' }, t(option.key)),
+          option.value === policy ? h(CheckIcon, null) : null)))
+      )
+    }
+
     /** Accessible switch; the framework owns colors through the stylesheet. */
     function Switch({ checked, busy, label, onChange }) {
       return h('button', {
@@ -861,12 +1052,11 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'pg-root' },
         error === undefined ? null : h('p', { className: 'pg-error', role: 'alert' }, `${t('row.error')} ${error}`),
         h('div', { className: 'pg-policy' },
-          h('label', { className: 'pg-caption', htmlFor: 'plan-guard-policy' }, t('policy.label')),
-          h('select', {
-            id: 'plan-guard-policy', className: 'pg-select', value: policy, disabled: busy === 'policy',
-            'aria-label': t('policy.label'),
-            onChange: event => { void run('policy', () => api.setPolicy(event.target.value)) },
-          }, POLICY_OPTIONS.map(option => h('option', { key: option.value, value: option.value }, t(option.key)))),
+          h('label', { className: 'pg-caption' }, t('policy.label')),
+          h(PolicyMenu, {
+            policy, busy: busy === 'policy', t,
+            onSelect: (value) => { void run('policy', () => api.setPolicy(value)) },
+          }),
         ),
         h('section', { className: 'pg-section' },
           h('div', { className: 'pg-sectionHead' },

@@ -344,6 +344,53 @@ test('storage domain and table names satisfy the storage unit rule', () => {
   for (const table of Object.keys(t.guardDomainSpec.tables)) assert.match(table, unitName)
 })
 
+test('record autoPlan bookkeeping survives normalization', () => {
+  assert.equal(t.normalizeRecord({}).autoPlan, null)
+  assert.equal(t.normalizeRecord({ autoPlan: 'p1' }).autoPlan, 'p1')
+  assert.equal(t.normalizeRecord({ autoPlan: 42 }).autoPlan, null)
+  assert.equal(t.normalizeRecord({ autoPlan: '' }).autoPlan, null)
+})
+
+test('auto displacement journals the new plan and notices the old one', () => {
+  const cfg = baseConfig()
+  const docA = { ...planDoc('pA', 'Plan A', '# Plan A'), accepted: true }
+  const docB = { ...planDoc('pB', 'Plan B', '# Plan B'), accepted: true }
+  assert.deepEqual(
+    t.planAutoTransition([docA], record(), cfg, true),
+    { autoPlan: 'pA', addPlan: { id: 'pA', label: 'Plan A' }, removePlan: null },
+  )
+  assert.deepEqual(
+    t.planAutoTransition([docA, docB], record({ autoPlan: 'pA' }), cfg, true),
+    {
+      autoPlan: 'pB',
+      addPlan: { id: 'pB', label: 'Plan B' },
+      removePlan: { id: 'pA', label: 'Plan A' },
+    },
+  )
+  assert.equal(t.planAutoTransition([docA, docB], record({ autoPlan: 'pB' }), cfg, true), undefined)
+  const rejectedB = { ...docB, accepted: false }
+  assert.deepEqual(
+    t.planAutoTransition([docA, rejectedB], record({ autoPlan: 'pA' }), cfg, true),
+    { autoPlan: null, addPlan: null, removePlan: { id: 'pA', label: 'Plan A' } },
+  )
+  assert.equal(t.planAutoTransition([], record({ autoPlan: null }), cfg, true), undefined)
+})
+
+test('displacement never touches explicitly chosen plans', () => {
+  const cfg = baseConfig()
+  const docA = { ...planDoc('pA', 'Plan A', '# Plan A'), accepted: true }
+  const docB = { ...planDoc('pB', 'Plan B', '# Plan B'), accepted: true }
+  const kept = t.planAutoTransition([docA, docB], record({ autoPlan: 'pA', plans: { pA: 'mounted' } }), cfg, true)
+  assert.equal(kept.autoPlan, 'pB')
+  assert.deepEqual(kept.addPlan, { id: 'pB', label: 'Plan B' })
+  assert.equal(kept.removePlan, null)
+  const dropped = t.planAutoTransition([docA, docB], record({ autoPlan: 'pA', plans: { pA: 'unmounted' } }), cfg, true)
+  assert.equal(dropped.removePlan, null)
+  const unknownB = { ...planDoc('pB', 'Plan B', '# Plan B') }
+  assert.equal(t.planAutoTransition([docA, unknownB], record({ autoPlan: 'pA' }), cfg, true).autoPlan, 'pB')
+  assert.equal(t.planAutoTransition([docA], record(), cfg, false), undefined)
+})
+
 test('pending journal coalesces by key and stays bounded', () => {
   const added = t.applyPending(undefined, { action: 'added', key: 'note:a', kind: 'note', id: 'note:a', label: 'A' })
   assert.deepEqual(added.added['note:a'], { kind: 'note', id: 'note:a', label: 'A' })
