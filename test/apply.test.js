@@ -270,7 +270,24 @@ test('service setPlan writes explicit choices and clears to auto', async () => {
   assert.equal(state.plans[0].explicit, null)
 })
 
-test('pre-step injector splices one message with plan, note, and file', async () => {
+/** Mark a delivered injection as live on the fake Session surface. */
+function surfaceVisible(fake, message) {
+  fake.session.surface.nodes.push('injected')
+  fake.session.eventAt = seq => (seq === 'injected' ? { type: 'user/message', data: message } : undefined)
+}
+
+/** Run the pre-step waterfall with one claimed user message. */
+async function preStep(fake, { turn = 1, step = 2, empty = false } = {}) {
+  const entering = empty ? [] : [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }]
+  const decision = { kind: 'enter', messages: entering }
+  const result = await fake.listeners.get('agent/pre-step')(
+    { agent: fake.rootAgent, messages: entering, turn, step, signal: new AbortController().signal },
+    async () => decision,
+  )
+  return result
+}
+
+test('pre-step injector sends the full snapshot while nothing is visible', async () => {
   const fake = await setup()
   fake.setProjection({
     docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one\nbody', turn: 1 }],
@@ -279,29 +296,103 @@ test('pre-step injector splices one message with plan, note, and file', async ()
   const service = fake.provided.get(SERVICE_KEY)
   await service.addNote(SESSION_ID, 'Constraint', 'Keep it stable.')
   await service.addFile(SESSION_ID, 'src/a.ts')
-  const entering = [{ id: 'user-1', role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }]
-  const decision = { kind: 'enter', messages: entering }
-  const injector = fake.listeners.get('agent/pre-step')
-  const result = await injector({
-    agent: fake.rootAgent,
-    messages: entering,
-    turn: 1,
-    step: 2,
-    signal: new AbortController().signal,
-  }, async () => decision)
+
+  const result = await preStep(fake)
   assert.equal(result.messages.length, 2)
   const injected = result.messages[1]
   assert.equal(injected.source.kind, 'plan-guard')
   assert.match(injected.content[0].text, /Plan one/)
   assert.match(injected.content[0].text, /Constraint/)
   assert.match(injected.content[0].text, /export const a = 1/)
+  // The snapshot accounted for every journal entry.
+  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, removed: {} })
 
-  const second = await injector({
-    agent: fake.rootAgent,
-    messages: entering,
-    turn: 1,
-    step: 3,
-    signal: new AbortController().signal,
-  }, async () => decision)
-  assert.equal(second.messages.length, 2)
+  surfaceVisible(fake, injected)
+  const again = await preStep(fake, { turn: 2 })
+  assert.equal(again.messages.length, 1, 'a visible snapshot is never re-sent')
+})
+
+test('a mount is injected on the next step without waiting for a compaction', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: false })
+  await fake.provided.get(SERVICE_KEY).addNote(SESSION_ID, 'Immediate', 'Show it now.')
+
+  const result = await preStep(fake)
+  assert.equal(result.messages.length, 2)
+  assert.match(result.messages[1].content[0].text, /Show it now\./)
+})
+
+test('an incremental delivery carries the addition and one removal sentence', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  const service = fake.provided.get(SERVICE_KEY)
+  await service.addNote(SESSION_ID, 'First', 'First body.')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  await service.addNote(SESSION_ID, 'Second', 'Second body.')
+  const added = await preStep(fake, { turn: 2 })
+  assert.equal(added.messages.length, 2)
+  const delta = added.messages[1].content[0].text
+  assert.match(delta, /— update/)
+  assert.match(delta, /Second body\./)
+  assert.ok(!delta.includes('First body.'), 'an addition does not repeat the whole snapshot')
+
+  const record = fake.records.get(SESSION_ID)
+  const firstNote = Object.values(record.items).find(item => item.title === 'First')
+  await service.setMounted(SESSION_ID, firstNote.id, false)
+  const removed = await preStep(fake, { turn: 3 })
+  const line = removed.messages[1].content[0].text
+  assert.match(line, /Note "First" is no longer guarded\./)
+  assert.ok(!line.includes('## Note:'), 'a removal carries no content')
+  assert.ok(!line.includes('First body.'))
+
+  const idempotent = await preStep(fake, { turn: 4 })
+  assert.equal(idempotent.messages.length, 1, 'a delivered change is not repeated')
+})
+
+test('a compaction re-injects what is still guarded and drops the rest', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  const service = fake.provided.get(SERVICE_KEY)
+  await service.addNote(SESSION_ID, 'Keep', 'Keep body.')
+  await service.addNote(SESSION_ID, 'Drop', 'Drop body.')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  const record = fake.records.get(SESSION_ID)
+  const drop = Object.values(record.items).find(item => item.title === 'Drop')
+  await service.setMounted(SESSION_ID, drop.id, false)
+  await preStep(fake, { turn: 2 })
+
+  fake.session.surface.nodes = []
+  fake.session.eventAt = () => undefined
+  const snapshot = await preStep(fake, { turn: 3 })
+  assert.equal(snapshot.messages.length, 2)
+  const text = snapshot.messages[1].content[0].text
+  assert.match(text, /Keep body\./)
+  assert.ok(!text.includes('Drop body.'), 'an unmounted item is gone from the snapshot')
+})
+
+test('lock and policy changes inject nothing', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  const service = fake.provided.get(SERVICE_KEY)
+  await service.addNote(SESSION_ID, 'Locked', 'Body.')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  const record = fake.records.get(SESSION_ID)
+  const note = Object.values(record.items)[0]
+  await service.setLock(SESSION_ID, note.id, true)
+  await service.setPolicy(SESSION_ID, 'deny-all')
+  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, removed: {} })
+  const result = await preStep(fake, { turn: 2 })
+  assert.equal(result.messages.length, 1)
+})
+
+test('the tool reports availability from the next step', async () => {
+  const fake = await setup()
+  const added = await fake.tool().execute({ action: 'add_note', text: 'Keep it.' }, execFor(fake, 'call-copy'))
+  assert.match(added.text, /from the next step/)
 })

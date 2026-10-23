@@ -90,12 +90,59 @@ const isRecord = (value) => typeof value === 'object' && value !== null && !Arra
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0
 /** Own-record item lookup; never walks Object.prototype for a hostile id. */
 const ownItem = (record, id) => (Object.hasOwn(record.items, id) ? record.items[id] : undefined)
+/** Empty change journal for the guarded set. */
+const emptyPending = () => ({ added: {}, removed: {} })
+/** Shallow copy of the journal's two buckets. */
+const clonePending = (pending) => ({
+  added: { ...(pending?.added ?? {}) },
+  removed: { ...(pending?.removed ?? {}) },
+})
+/** Kinds a pending change can name; anything else is dropped on read. */
+const PENDING_KINDS = new Set(['plan', 'file', 'note'])
+/** Bound on the journal so a long offline gap cannot grow the record. */
+const PENDING_LIMIT = 200
+
 const cloneRecord = (record) => ({
   version: 2,
   policy: record.policy,
   plans: { ...record.plans },
   items: { ...record.items },
+  pending: clonePending(record.pending),
 })
+
+/**
+ * Record one change in the pending journal, coalescing by key: the newest
+ * action wins, so add-then-remove leaves nothing to report and a removal that
+ * is immediately undone never reaches the model.
+ * @param pending - current journal, possibly missing on a legacy record.
+ * @param change - `{ action: 'added'|'removed', key, kind, id, label }`.
+ * @returns a new journal, capped at `PENDING_LIMIT` entries.
+ */
+export function applyPending(pending, change) {
+  const next = clonePending(pending)
+  const entry = { kind: change.kind, id: change.id, label: String(change.label).slice(0, 200) }
+  if (change.action === 'added') {
+    delete next.removed[change.key]
+    next.added[change.key] = entry
+  } else {
+    delete next.added[change.key]
+    next.removed[change.key] = entry
+  }
+  return trimPending(next)
+}
+
+/** Drop the oldest journal entries once the cap is exceeded. */
+function trimPending(pending) {
+  let total = Object.keys(pending.added).length + Object.keys(pending.removed).length
+  while (total > PENDING_LIMIT) {
+    const bucket = Object.keys(pending.added).length > 0 ? pending.added : pending.removed
+    const oldest = Object.keys(bucket)[0]
+    if (oldest === undefined) break
+    delete bucket[oldest]
+    total -= 1
+  }
+  return pending
+}
 
 /**
  * Validate one raw loader-row config, applying defaults.
@@ -310,6 +357,23 @@ function normalizeItemStrict(id, raw) {
   }
 }
 
+/** Lenient journal normalization: malformed entries are dropped, never fatal. */
+function normalizePending(raw) {
+  const pending = emptyPending()
+  if (!isRecord(raw)) return pending
+  for (const bucket of ['added', 'removed']) {
+    const source = raw[bucket]
+    if (!isRecord(source)) continue
+    for (const [key, entry] of Object.entries(source)) {
+      if (key === '' || !isRecord(entry)) continue
+      if (!PENDING_KINDS.has(entry.kind)) continue
+      if (!isNonEmptyString(entry.id) || !isNonEmptyString(entry.label)) continue
+      pending[bucket][key] = { kind: entry.kind, id: entry.id, label: entry.label.slice(0, 200) }
+    }
+  }
+  return pending
+}
+
 /**
  * Strict record normalization used by the storage domain's load schema and by
  * reads. Legacy `{ guarded: { id: true } }` records are accepted as explicit
@@ -348,7 +412,7 @@ export function normalizeRecord(raw) {
     if (!isRecord(raw.items)) throw new Error('plan-guard items are not an object')
     for (const [id, item] of Object.entries(raw.items)) items[id] = normalizeItemStrict(id, item)
   }
-  return { version: 2, policy, plans, items }
+  return { version: 2, policy, plans, items, pending: normalizePending(raw.pending) }
 }
 
 const guardRecordSchema = { parse(value) { return normalizeRecord(value) } }
@@ -365,13 +429,14 @@ const guardDomainSpec = {
 function readRecord(domain, config, sessionId) {
   const raw = domain.table('sessions').get(String(sessionId))
   if (raw === undefined) {
-    return { version: 2, policy: config.defaultPolicy, plans: {}, items: {} }
+    return { version: 2, policy: config.defaultPolicy, plans: {}, items: {}, pending: emptyPending() }
   }
   return {
     version: 2,
     policy: raw.policy ?? config.defaultPolicy,
     plans: raw.plans ?? {},
     items: raw.items ?? {},
+    pending: clonePending(raw.pending),
   }
 }
 
@@ -521,9 +586,39 @@ async function readTextCapped(fs, target, cap, signal) {
   return { text, truncated }
 }
 
+/** One plan document as an injected section. */
+function planSectionText(doc, config) {
+  const body = doc.markdown.length > config.maxCharsPerPlan
+    ? `${doc.markdown.slice(0, config.maxCharsPerPlan)}\n[plan-guard: plan truncated at ${config.maxCharsPerPlan} characters]`
+    : doc.markdown
+  return `## Plan: ${doc.title}\nplan: ${doc.callId}\n\n${body}`
+}
+
+/** One note or file as an injected section, with its unreadable/truncated markers. */
+function itemSectionText(item, config, contents) {
+  if (item.kind === 'note') {
+    const body = item.text.length > config.maxCharsPerNote
+      ? `${item.text.slice(0, config.maxCharsPerNote)}\n[plan-guard: note truncated at ${config.maxCharsPerNote} characters]`
+      : item.text
+    return `## Note: ${item.title}\nitem: ${item.id}\n\n${body}`
+  }
+  const content = contents?.[item.id]
+  let body
+  if (content === undefined) {
+    body = '[plan-guard: file content unavailable]'
+  } else if (content.error !== undefined) {
+    body = `[plan-guard: file unreadable: ${content.error}]`
+  } else {
+    body = content.text ?? ''
+    if (content.truncated === true) body += `\n[plan-guard: file truncated at ${config.maxCharsPerFile} characters]`
+  }
+  return `## File: ${item.displayPath}\nitem: ${item.id}\n\n${body}`
+}
+
 /**
- * Compose the one injected user message. Pure apart from the file contents the
- * caller already read; returns undefined when nothing is mounted.
+ * Compose the full guarded-context snapshot (sent after a compaction, or the
+ * first time anything is guarded). Pure apart from the file contents the caller
+ * already read; returns undefined when nothing is mounted.
  */
 export function composeGuardText({ docs, record, config, sawCompaction, contents }) {
   const mountedPlans = docs
@@ -537,9 +632,9 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
   const omitted = []
   const included = []
   const header = `${config.header}\n`
-    + 'This block is re-sent after each successful context compaction. It is background context, not a new request.\n\n'
+    + 'This block is background context, not a new request; it is sent again after each successful compaction and whenever the guarded set changes.\n\n'
   const footer = config.toolEnabled === false
-    ? '\n\nPlans and pinned items are managed by the user in the Plan Guard drawer.\n'
+    ? '\n\nPlans and pinned items are managed by the user in the Guarded context drawer.\n'
     : '\n\nUse the `context_guard` tool to list, mount, unmount, or add notes/files. Plans are user-controlled.\n'
   let used = header.length + footer.length
   if (used >= config.maxTotalChars) return undefined
@@ -552,32 +647,8 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
     sections.push(section)
     included.push(id)
   }
-  for (const { doc } of mountedPlans) {
-    const body = doc.markdown.length > config.maxCharsPerPlan
-      ? `${doc.markdown.slice(0, config.maxCharsPerPlan)}\n[plan-guard: plan truncated at ${config.maxCharsPerPlan} characters]`
-      : doc.markdown
-    push(doc.callId, `## Plan: ${doc.title}\nplan: ${doc.callId}\n\n${body}`)
-  }
-  for (const item of [...humanItems, ...modelItems]) {
-    if (item.kind === 'note') {
-      const body = item.text.length > config.maxCharsPerNote
-        ? `${item.text.slice(0, config.maxCharsPerNote)}\n[plan-guard: note truncated at ${config.maxCharsPerNote} characters]`
-        : item.text
-      push(item.id, `## Note: ${item.title}\nitem: ${item.id}\n\n${body}`)
-      continue
-    }
-    const content = contents?.[item.id]
-    let body
-    if (content === undefined) {
-      body = '[plan-guard: file content unavailable]'
-    } else if (content.error !== undefined) {
-      body = `[plan-guard: file unreadable: ${content.error}]`
-    } else {
-      body = content.text ?? ''
-      if (content.truncated === true) body += `\n[plan-guard: file truncated at ${config.maxCharsPerFile} characters]`
-    }
-    push(item.id, `## File: ${item.displayPath}\nitem: ${item.id}\n\n${body}`)
-  }
+  for (const { doc } of mountedPlans) push(doc.callId, planSectionText(doc, config))
+  for (const item of [...humanItems, ...modelItems]) push(item.id, itemSectionText(item, config, contents))
   if (sections.length === 0) return undefined
   const omittedLine = omitted.length === 0
     ? ''
@@ -586,6 +657,73 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
     text: header + sections.join('\n\n') + omittedLine + footer,
     included,
     omitted,
+  }
+}
+
+/** How a removal notice names one journal entry. */
+function removalNoun(entry) {
+  if (entry.kind === 'plan') return `Plan "${entry.label}"`
+  if (entry.kind === 'note') return `Note "${entry.label}"`
+  return `File ${entry.label}`
+}
+
+/**
+ * Compose the incremental message for changes since the last delivery: one
+ * sentence per removal, then the added content in the same section format the
+ * snapshot uses. Append-only by design, so the request prefix stays cached.
+ * @returns `{ text, added, removed }`, or undefined when nothing is worth sending.
+ */
+export function composeUpdate({ pending, record, docs, config, sawCompaction, contents }) {
+  const planIndex = new Map(docs.map((doc, index) => [doc.callId, { doc, index }]))
+  const isGuarded = (entry) => {
+    if (entry.kind === 'plan') {
+      const found = planIndex.get(entry.id)
+      if (found === undefined) return false
+      return effectivePlanState(found.doc, found.index, docs, record, config, sawCompaction).mounted
+    }
+    const item = ownItem(record, entry.id)
+    return item !== undefined && item.mounted === true
+  }
+  const removedLines = Object.values(pending?.removed ?? {})
+    .filter(entry => !isGuarded(entry))
+    .map(entry => `${removalNoun(entry)} is no longer guarded.`)
+  const addedPlanIds = new Set()
+  const addedItemIds = new Set()
+  for (const entry of Object.values(pending?.added ?? {})) {
+    if (!isGuarded(entry)) continue
+    if (entry.kind === 'plan') addedPlanIds.add(entry.id)
+    else addedItemIds.add(entry.id)
+  }
+  const addedItems = Object.values(record.items)
+    .filter(item => addedItemIds.has(item.id) && item.mounted === true)
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  const addedPlans = docs.filter(doc => addedPlanIds.has(doc.callId)).reverse()
+  if (removedLines.length === 0 && addedPlans.length === 0 && addedItems.length === 0) return undefined
+
+  const removedText = removedLines.length === 0 ? '' : `${removedLines.join(' ')}\n\n`
+  const prefix = `${config.header} — update\nBackground context, not a new request.\n\n${removedText}`
+  let used = prefix.length
+  const sections = []
+  const omitted = []
+  const included = []
+  const push = (id, section) => {
+    if (used + section.length + 2 > config.maxTotalChars) {
+      omitted.push(id)
+      return
+    }
+    used += section.length + 2
+    sections.push(section)
+    included.push(id)
+  }
+  for (const doc of addedPlans) push(doc.callId, planSectionText(doc, config))
+  for (const item of addedItems) push(item.id, itemSectionText(item, config, contents))
+  const omittedLine = omitted.length === 0
+    ? ''
+    : `\n[plan-guard: omitted over the total cap: ${omitted.join(', ')}]`
+  return {
+    text: prefix + sections.join('\n\n') + omittedLine,
+    added: included,
+    removed: removedLines,
   }
 }
 
@@ -626,6 +764,13 @@ function createOperations(ctx, domain, projections, sessions, config) {
     await domain.table('sessions').put(String(sessionId), next)
     return { record: next, changed: true }
   })
+  /** Journal one guarded-set change on the record being written. */
+  const journal = (next, action, key, kind, id, label) => {
+    next.pending = applyPending(next.pending ?? emptyPending(), { action, key, kind, id, label })
+    return next
+  }
+  /** Display label a removal notice can still use after the entry is gone. */
+  const itemLabel = (item) => (item.kind === 'file' ? item.displayPath : item.title)
 
   const findFileItem = (record, absolutePath) => Object.values(record.items)
     .find(item => item.kind === 'file' && item.path === absolutePath)
@@ -706,15 +851,30 @@ function createOperations(ctx, domain, projections, sessions, config) {
     if (typeof choice !== 'string' || !PLAN_CHOICES.includes(choice)) {
       throw new Error(`plan choice must be one of ${PLAN_CHOICES.join(', ')}`)
     }
-    const docs = projections.stateOf(session, PLAN_DOCS_PROJECTION_KEY)?.docs ?? []
-    if (!docs.some(doc => doc.callId === callId)) {
+    const projected = projections.stateOf(session, PLAN_DOCS_PROJECTION_KEY)
+    const docs = projected?.docs ?? []
+    const sawCompaction = projected?.sawCompaction === true
+    const index = docs.findIndex(doc => doc.callId === callId)
+    if (index < 0) {
       throw new Error(`No plan document with call id ${JSON.stringify(callId)} in this Session.`)
     }
+    const doc = docs[index]
     return mutate(sessionId, (current) => {
+      const before = effectivePlanState(doc, index, docs, current, config, sawCompaction)
       const next = cloneRecord(current)
       if (choice === 'auto') delete next.plans[callId]
       else next.plans[callId] = choice
-      return next
+      const after = effectivePlanState(doc, index, docs, next, config, sawCompaction)
+      if (before.mounted === after.mounted) {
+        // `auto` clears an explicit choice without flipping the effective state;
+        // that is a real write but needs no journal entry, and the same choice
+        // written twice is not a change at all.
+        const sameChoice = choice === 'auto'
+          ? current.plans[callId] === undefined
+          : current.plans[callId] === choice
+        return sameChoice ? undefined : next
+      }
+      return journal(next, after.mounted ? 'added' : 'removed', `plan:${callId}`, 'plan', callId, doc.title)
     })
   }
 
@@ -793,7 +953,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
         if (auth.decision === 'ask' && approved !== true) throw new Error(auth.reason)
         const next = cloneRecord(current)
         next.items[existing.id] = { ...existing, mounted: true }
-        return next
+        return journal(next, 'added', existing.id, 'file', existing.id, itemLabel(existing))
       }
       if (Object.keys(current.items).length >= config.maxItems) {
         throw new Error(`This Session already has the maximum of ${config.maxItems} pinned items; remove one before adding another.`)
@@ -816,7 +976,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
       }
       const next = cloneRecord(current)
       next.items[id] = item
-      return next
+      return journal(next, 'added', id, 'file', id, prepared.displayPath)
     }).then(({ record, changed }) => {
       const item = findFileItem(record, prepared.path)
       return { status: changed === false ? 'unchanged' : item?.id === id ? 'added' : 'mounted', item }
@@ -852,7 +1012,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
       }
       const next = cloneRecord(current)
       next.items[id] = item
-      return next
+      return journal(next, 'added', id, 'note', id, title)
     }).then(({ record }) => ({ status: 'added', item: record.items[id] }))
   }
 
@@ -871,7 +1031,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
       if (auth.decision === 'ask' && approved !== true) throw new Error(auth.reason)
       const next = cloneRecord(current)
       next.items[itemId] = { ...item, mounted }
-      return next
+      return journal(next, mounted ? 'added' : 'removed', itemId, item.kind, itemId, itemLabel(item))
     }).then(({ record, changed }) => ({
       status: changed === false ? 'unchanged' : (mounted ? 'mounted' : 'unmounted'),
       item: record.items[itemId],
@@ -894,10 +1054,15 @@ function createOperations(ctx, domain, projections, sessions, config) {
   const removeItem = (sessionId, itemId) => {
     requireLive(sessionId)
     return mutate(sessionId, (current) => {
-      if (ownItem(current, itemId) === undefined) throw new Error(`No guarded item with id ${JSON.stringify(itemId)}.`)
+      const item = ownItem(current, itemId)
+      if (item === undefined) throw new Error(`No guarded item with id ${JSON.stringify(itemId)}.`)
       const next = cloneRecord(current)
       delete next.items[itemId]
-      return next
+      // Only mounted content leaves the guarded set; deleting an item that was
+      // already unmounted changes the drawer, not what the model sees.
+      return item.mounted === true
+        ? journal(next, 'removed', itemId, item.kind, itemId, itemLabel(item))
+        : next
     })
   }
 
@@ -928,10 +1093,41 @@ function createOperations(ctx, domain, projections, sessions, config) {
     throw new Error(`No guarded item or plan with id ${JSON.stringify(id)}.`)
   }
 
+  /**
+   * Drop journal entries the injector just delivered. Keys are removed
+   * individually, so a change arriving between the read and this write survives
+   * to the next step.
+   * @param sessionId - target Session.
+   * @param keys - journal keys the injected message accounted for.
+   */
+  const markInjected = (sessionId, keys) => {
+    const unique = [...new Set(keys)]
+    if (unique.length === 0) return Promise.resolve({ record: undefined, changed: false })
+    return mutate(sessionId, (current) => {
+      const pending = clonePending(current.pending)
+      let touched = false
+      for (const key of unique) {
+        if (Object.hasOwn(pending.added, key)) {
+          delete pending.added[key]
+          touched = true
+        }
+        if (Object.hasOwn(pending.removed, key)) {
+          delete pending.removed[key]
+          touched = true
+        }
+      }
+      if (!touched) return undefined
+      const next = cloneRecord(current)
+      next.pending = pending
+      return next
+    })
+  }
+
   return {
     config,
     read,
     state,
+    markInjected,
     setPolicy,
     setPlan,
     prepareFile,
@@ -1046,7 +1242,7 @@ function toolPreviewText(item, prepared) {
 function createTool(ctx, operations, config) {
   return {
     name: TOOL_NAME,
-    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they are re-injected after every successful context compaction. Plans are user-controlled; this tool cannot mount or unmount them. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content is re-injected after the next successful compaction, not immediately; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them.',
+    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they are re-injected after every successful context compaction. Plans are user-controlled; this tool cannot mount or unmount them. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the whole set is re-sent after each successful compaction; an unmount adds one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them.',
     parameters: {
       type: 'object',
       properties: {
@@ -1132,7 +1328,7 @@ function createTool(ctx, operations, config) {
         const outcome = await operations.addFile(sessionId, prepared, 'model', approved)
         if (outcome.item === undefined) throw new Error('The file item could not be found after the change.')
         const verb = outcome.status === 'added' ? 'Added and mounted' : outcome.status === 'mounted' ? 'Mounted' : 'Already mounted'
-        const text = `${verb} file ${prepared.displayPath} as ${outcome.item.id}. It will be re-injected after the next successful compaction.`
+        const text = `${verb} file ${prepared.displayPath} as ${outcome.item.id}. It is available to you from the next step.`
           + toolPreviewText(outcome.item, prepared)
         return { action: 'add_file', text }
       }
@@ -1154,7 +1350,7 @@ function createTool(ctx, operations, config) {
         if (outcome.item === undefined) throw new Error('The note item could not be found after the change.')
         return {
           action: 'add_note',
-          text: `Added and mounted note "${outcome.item.title}" as ${outcome.item.id}. It will be re-injected after the next successful compaction.`,
+          text: `Added and mounted note "${outcome.item.title}" as ${outcome.item.id}. It is available to you from the next step.`,
         }
       }
 
@@ -1180,7 +1376,7 @@ function createTool(ctx, operations, config) {
       const outcome = await operations.setMounted(sessionId, item.id, mounted, 'model', approved)
       return {
         action: call.action,
-        text: `${outcome.status === 'unchanged' ? 'Already' : mounted ? 'Mounted' : 'Unmounted'} ${item.kind === 'file' ? 'file' : 'note'} ${item.title} (${item.id}).${mounted ? ' It will be re-injected after the next successful compaction.' : ' The item remains stored and can be mounted again.'}`,
+        text: `${outcome.status === 'unchanged' ? 'Already' : mounted ? 'Mounted' : 'Unmounted'} ${item.kind === 'file' ? 'file' : 'note'} ${item.title} (${item.id}).${mounted ? ' It is available to you from the next step.' : ' The item remains stored; a one-line notice tells you it is no longer guarded.'}`,
       }
     },
   }
@@ -1219,42 +1415,89 @@ function injectionVisible(agent, decision) {
   return false
 }
 
+/** Journal keys a pending record carries. */
+function pendingKeys(pending) {
+  return [...Object.keys(pending?.added ?? {}), ...Object.keys(pending?.removed ?? {})]
+}
+
 /**
- * Build the pre-step listener: after the waterfall resolves (any compaction in
- * the same chain has committed by then), splice one message with the effective
- * plans and mounted items after the claimed batch. Failures self-heal on the
- * next step; the step itself never fails because of this plugin.
+ * Splice one message right after the claimed batch — the tail of the request,
+ * before the per-step runtime-context block. Append-only: nothing earlier is
+ * touched, so the cached request prefix stays valid.
+ */
+function injectMessage(decision, messages, message) {
+  const lastClaimedIndex = decision.messages.findLastIndex(entry => messages.includes(entry))
+  const at = lastClaimedIndex < 0 ? decision.messages.length : lastClaimedIndex + 1
+  return { ...decision, messages: decision.messages.toSpliced(at, 0, message) }
+}
+
+/**
+ * Build the pre-step listener. Two triggers, both append-only:
+ * - the guarded set is not on the surface (after a compaction, or the first time
+ *   anything gets guarded) → the full snapshot;
+ * - the journal holds changes → one incremental message: a sentence per removal
+ *   and the content of what was added.
+ * Failures self-heal on the next step; the step itself never fails because of
+ * this plugin.
  */
 function createInjector(ctx, projections, config, operations) {
+  const clear = async (sessionId, keys) => {
+    if (keys.length === 0) return
+    try {
+      await operations.markInjected(sessionId, keys)
+    } catch (error) {
+      ctx.logger?.warn?.(`plan-guard: clearing delivered changes failed for session ${sessionId}: ${String(error)}`)
+    }
+  }
   return async ({ agent, messages, turn, step, signal }, next) => {
     const decision = await next()
     if (config.disabled === true) return decision
     // An empty first entry owns a no-step turn; never turn one into a request.
     if (decision.kind === 'reject' || (step === 1 && decision.messages.length === 0)) return decision
     try {
+      const sessionId = agent.session?.id
+      if (sessionId === undefined) return decision
+      const record = operations.read(sessionId)
+      const pending = record.pending ?? emptyPending()
+      const keys = pendingKeys(pending)
+      const visible = injectionVisible(agent, decision)
+      if (visible && keys.length === 0) return decision
+
       const projected = projections.stateOf(agent.session, PLAN_DOCS_PROJECTION_KEY)
-      if (projected?.sawCompaction !== true) return decision
-      const docs = projected.docs ?? []
-      const record = operations.read(agent.session.id)
-      const mountedItems = Object.values(record.items).filter(item => item.mounted === true)
-      if (docs.length === 0 && mountedItems.length === 0) return decision
-      if (injectionVisible(agent, decision)) return decision
+      const docs = projected?.docs ?? []
+      const sawCompaction = projected?.sawCompaction === true
+
+      if (!visible) {
+        const mountedItems = Object.values(record.items).filter(item => item.mounted === true)
+        let composed
+        if (docs.length > 0 || mountedItems.length > 0) {
+          signal?.throwIfAborted?.()
+          const contents = await operations.readFileContents(Object.values(record.items), signal)
+          signal?.throwIfAborted?.()
+          composed = composeGuardText({ docs, record, config, sawCompaction, contents })
+        }
+        if (composed === undefined) {
+          await clear(sessionId, keys)
+          return decision
+        }
+        const entered = injectMessage(decision, messages, guardMessage(composed.text))
+        await clear(sessionId, keys)
+        ctx.logger?.debug?.('plan-guard: injected the guarded snapshot (turn %d step %d, %d plan(s), %d item(s))', turn, step, composed.included.length, mountedItems.length)
+        return entered
+      }
+
       signal?.throwIfAborted?.()
       const contents = await operations.readFileContents(Object.values(record.items), signal)
       signal?.throwIfAborted?.()
-      const composed = composeGuardText({
-        docs,
-        record,
-        config,
-        sawCompaction: projected.sawCompaction === true,
-        contents,
-      })
-      if (composed === undefined) return decision
-      const message = guardMessage(composed.text)
-      const lastClaimedIndex = decision.messages.findLastIndex(entry => messages.includes(entry))
-      const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, message)
-      ctx.logger?.debug?.('plan-guard: injected guarded context (turn %d step %d, %d plan(s), %d item(s))', turn, step, composed.included.length, mountedItems.length)
-      return { ...decision, messages: entered }
+      const update = composeUpdate({ pending, record, docs, config, sawCompaction, contents })
+      if (update === undefined) {
+        await clear(sessionId, keys)
+        return decision
+      }
+      const entered = injectMessage(decision, messages, guardMessage(update.text))
+      await clear(sessionId, keys)
+      ctx.logger?.debug?.('plan-guard: injected guarded changes (turn %d step %d, %d added, %d removed)', turn, step, update.added.length, update.removed.length)
+      return entered
     } catch (error) {
       ctx.logger?.warn?.(`plan-guard: injection failed for session ${agent.session?.id}: ${String(error)}`)
       return decision
@@ -1499,6 +1742,8 @@ export const __testables = {
   authorizeModelAction,
   validateToolArgs,
   composeGuardText,
+  composeUpdate,
+  applyPending,
   planDocument,
   foldDocs,
   stateInit,

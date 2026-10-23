@@ -1,14 +1,15 @@
 # dsh-plan-guard
 
-给 DSH（DeepSeek Harness）的**守护上下文**插件：让 Plan、备注、文件跨上下文压缩持续可见。DSH 的压缩会把一段会话换成摘要检查点，模型随后只看得到摘要；本插件在每次成功压缩后的第一步，把当前守护内容重新拼成一条 user 消息注入，模型不必重新翻文件，人类不必重述约束。
+给 DSH（DeepSeek Harness）的**守护上下文**插件：让 Plan、备注、文件跨上下文压缩持续可见。DSH 的压缩会把一段会话换成摘要检查点，模型随后只看得到摘要；本插件把当前守护内容拼成一条 user 消息注入：**首次**和**每次成功压缩后**发完整快照，**挂载/卸载后的下一步**发增量（新增发正文，卸载只发一句提示），模型不必重新翻文件，人类也不必重述约束。
 
 - **只自动挂载最新 Plan**：首次压缩后，最新一份 Plan 自动生效；人类在此之前卸下，就一直保持未挂载。旧 Plan 留在列表里，可随时手动挂载。
 - **模型可增不可删**：模型能加备注/文件、挂载/卸载；不能动 Plan，也不能删除任何条目（包括自己加的，留痕审计）。删除只有人类能做。
 - **权限归人类**：会话级五档权限 + 条目级锁定；模型动作可以要求对话内批准，拒绝/超时都不写入。
+- **变更立刻可见**：新增内容在下一个 step 就能被模型看到，卸载只在尾部追加一行提示，不等压缩。
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.2.3 状态**：Host/Client 实现与 22 个测试已完成；尚未在真实安装的会话中验收注入、抽屉与问题卡片，未覆盖项见「[已知限制](#已知限制)」。
+> **v0.3.0 状态**：Host/Client 实现与 31 个测试已完成；已在临时安装的 `dsh web` 里用无头 Chrome 验收抽屉（浅色/深色）与真实模型回合的三条注入（快照 / 新增增量 / 卸载一行）。未覆盖项见「[已知限制](#已知限制)」。
 
 ## 工作原理
 
@@ -16,9 +17,10 @@ DSH 的会话日志是追加式的：压缩不删除事件，只是把一段事�
 
 1. **Plan 投影**：`sessionProjections` 从会话日志折叠出一份轻量投影 `plan-guard-docs`，记录每个 `exit_plan_mode`（含 PTC 派发）的 callId、标题、大小、提交轮次和 markdown（单条上限 64k），并记住是否发生过一次成功压缩。
 2. **守护记录**：抽屉和工具把人类的选择写进 storage domain `plan-guard` 的 `sessions` 表，每个 session 一条 `{version: 2, policy, plans, items}`。Plan 只在记录里存 `mounted` / `unmounted` 标记；备注正文存记录，文件只存路径与元数据。
-3. **压缩后注入**：`agent/pre-step` 瀑布在 `await next()` 之后（此时同一链上的压缩已经落盘）拼一条 user 消息，插在本次进入的消息之后。内容 = 生效的 Plan + 所有已挂载条目；文件在这一刻实时读取。消息由 agent-loop 记成 `user/message`，满足「模型可见 ⟺ 已记录」。
-4. **不重复注入**：如果当前 surface、本批消息或下一步收件箱里已经有守护消息，就跳过。下一次成功压缩把它移出 surface 后，再注入新的一份。
-5. **抽屉读活会话**：右侧栏抽屉通过 `plan-guard-drawer://<sessionId>` 资源轮询，Host 端是 9 个 Remote 方法（list / policy / plan / item / note / file / content 等）。
+3. **注入时机**：`agent/pre-step` 瀑布在 `await next()` 之后拼一条 user 消息，插在本次进入的消息之后、runtime-context 之前。两条触发线：surface 上还没有守护消息时（首次注入，或压缩把它换成了摘要检查点）发**完整快照**；守护集合有变更时发**增量**。消息由 agent-loop 记成 `user/message`，满足「模型可见 ⟺ 已记录」。
+4. **增量只追加**：新增条目发正文（与快照同一套 `## Plan` / `## Note` / `## File` 段落）；卸载或删除只发一句 `Note "…" is no longer guarded.`。所有注入都追加在请求尾部，历史消息一字不改，所以 KV cache 的前缀照常复用；这段文字留到下次压缩为止。
+5. **不重复、可恢复**：变更记在记录的 `pending` 日记里（按条目合并，add 与 remove 互相抵消），注入成功后按 key 清除；进程重启后日记还在，下一步补发。压缩后的快照覆盖此前所有未送达的变更。
+6. **抽屉读活会话**：右侧栏抽屉通过 `dsh-resource://plan-guard-drawer/<sessionId>` 资源轮询，Host 端是 9 个 Remote 方法（list / policy / plan / item / note / file / content 等）。
 
 注入是**纯附加**的：插件不注册新的事件类型，不碰压缩阈值、保留比例、预设或摘要器。压缩本身失败时不会注入；注入失败只记日志，不会让 step 失败。
 
@@ -50,18 +52,18 @@ DSH 的会话日志是追加式的：压缩不删除事件，只是把一段事�
 | `unmount` | `itemId` | 卸载已有条目；条目保留，可再挂载 |
 
 - 没有 `remove`；删除只能由人类在抽屉里做。
-- 添加即挂载，挂载/卸载**下一次成功压缩**才反映到注入内容；要立刻读文件内容，用 `add_file` 返回的预览。
+- 添加即挂载，**下一个 step** 就能看到内容；卸载会在尾部追加一行 `… is no longer guarded.`。要立刻读文件内容，用 `add_file` 返回的预览。
 - 参数由工具自己校验（工具框架不校验原始 JSON Schema 参数），错误以工具错误返回。
 - 工具全局注册，所有 root 会话都能看到（包括 `minimal` 预设）；`agent/created` 时对子代理 `tools.restrict`，执行时再用 `agents.roots()` 兜底，所以子代理看不到也调不到。
 - 不写自定义工具卡片，Web 用默认的通用卡片。
 
 ## 注入内容
 
-每次成功压缩后的第一个 pre-step，注入一条这样的消息：
+surface 上没有守护消息时（首次、以及每次成功压缩之后），注入完整快照：
 
 ```text
 Guarded context (plans, notes, files)
-This block is re-sent after each successful context compaction. It is background context, not a new request.
+This block is background context, not a new request; it is sent again after each successful compaction and whenever the guarded set changes.
 
 ## Plan: 重构存储层
 plan: 019...
@@ -76,10 +78,24 @@ item: file:...
 <file content>
 ```
 
+有变更时（消息已可见），只注入增量——新增发正文，卸载发一句：
+
+```text
+Guarded context (plans, notes, files) — update
+Background context, not a new request.
+
+## Note: 发布前不要改 schema
+item: note:...
+
+<note text>
+
+Note "不要改动公开 API" is no longer guarded.
+```
+
 - **Plan 从日志推导**，不复制正文到 storage；取不到时给标记，不会中断注入。
 - **备注正文存 storage**；**文件在注入时实时读取**：添加时记下绝对路径和当时的 workspace root，注入时复核仍在该 root 内（除非显式允许越界），然后读最新内容。缺失、二进制、越界、超大都会写成可见标记，不会静默丢弃，也不会让 step 失败。
 - **四层上限**：单 Plan、单文件、单备注、总字符。超出时截断并标记；总上限溢出时按顺序保留，剩下的以省略 id 列出。
-- 同一 surface 只注入一次；压缩把它移走后才会再注入。
+- 快照只在 surface 上没有守护消息时发送；增量每条变更只发一次，卸载不重发正文。
 
 ## 配置
 
@@ -107,7 +123,7 @@ item: file:...
 
 前置：可用的 DSH（开发验证于 `0.2.1-rc.2` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.2.3
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.3.0
 
 **方式一：命令行** —— 上面的命令。
 
@@ -131,9 +147,10 @@ item: file:...
 
 ## 已知限制
 
-- **尚未做活会话验收**：v0.2.4 已经做到「装进 profile → `dsh web` 启动 → 无头 Chrome 打开页面不报错误、`New tab` 里出现 Guarded context、抽屉正常渲染并调到 `remote/list`」，但真实会话里的压缩后注入、问题卡片、权限门控、抽屉轮询刷新与压缩幂等性还没跑过。
+- **尚未做压缩矩阵验收**：v0.3.0 已在临时安装里跑过真实模型回合（快照、新增增量、卸载一行三条注入都对），但「压缩发生的那一刻」、问题卡片、权限矩阵与抽屉轮询刷新还没在真实会话里逐一跑过。
 - **抽屉只读活会话**：会话未恢复时显示提示，不能编辑；归档会话的读取（projection `wire.view`）未做。
-- **注入只在压缩后发生**：两次压缩之间的人类挂载/卸载不会改当前 surface，抽屉文案已说明。
+- **卸载提示只是一句话**：`… is no longer guarded.` 不会删掉历史里的旧正文；旧正文要等下次压缩才真正离开 surface。
+- **pending 有上限**：最多记 200 条未送达变更，超出丢最旧的；长时间停用注入（`disabled`）时可能少报几条。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
 - **备注不能原地编辑**：改内容要删除后重新添加。删除是 storage 操作，不额外写会话事件。
 - **模型不能删除任何条目**：工具没有删除动作；只能卸载。调用与结果留在会话日志里，便于审计。
@@ -150,10 +167,14 @@ item: file:...
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（22 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.2.4` ↔ `v0.2.4`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（31 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.3.0` ↔ `v0.3.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在压缩后追加一条消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.3.0` 变更即时注入 + 抽屉重做
+
+注入不再等压缩：`agent/pre-step` 用记录里的 `pending` 日记判断「有变更」，新增条目发正文、卸载删除发一行 `… is no longer guarded.`；surface 上没有守护消息时（首次、每次压缩后）才发完整快照。全部注入都追加在请求尾部，不改写历史，KV cache 前缀不失效。抽屉重做成主题 token（`--dsw-*`）与 `pg-` 类名样式表：卡片、开关、次按钮、focus ring 与原生右侧栏一致；删掉三段说明文案与重复徽标，新增 tab 图标、更短的 tab 标题与紧凑空状态。
 
 ### `0.2.4` 修复 Client 条目激活失败
 

@@ -263,3 +263,109 @@ test('storage domain and table names satisfy the storage unit rule', () => {
   assert.match(t.GUARD_DOMAIN_NAME, unitName)
   for (const table of Object.keys(t.guardDomainSpec.tables)) assert.match(table, unitName)
 })
+
+test('pending journal coalesces by key and stays bounded', () => {
+  const added = t.applyPending(undefined, { action: 'added', key: 'note:a', kind: 'note', id: 'note:a', label: 'A' })
+  assert.deepEqual(added.added['note:a'], { kind: 'note', id: 'note:a', label: 'A' })
+  const removed = t.applyPending(added, { action: 'removed', key: 'note:a', kind: 'note', id: 'note:a', label: 'A' })
+  assert.deepEqual(removed.added, {})
+  assert.deepEqual(removed.removed['note:a'], { kind: 'note', id: 'note:a', label: 'A' })
+  const readded = t.applyPending(removed, { action: 'added', key: 'note:a', kind: 'note', id: 'note:a', label: 'A' })
+  assert.deepEqual(readded.removed, {})
+  assert.ok(readded.added['note:a'])
+
+  let pending
+  for (let i = 0; i < 205; i += 1) {
+    pending = t.applyPending(pending, { action: 'added', key: `note:${i}`, kind: 'note', id: `note:${i}`, label: `N${i}` })
+  }
+  const keys = Object.keys(pending.added)
+  assert.equal(keys.length, 200)
+  assert.equal(keys[0], 'note:5')
+})
+
+test('incremental update reports removals as one sentence and adds content', () => {
+  const cfg = baseConfig()
+  const docs = [planDoc('p1', 'Plan one', '# Plan one')]
+  const rec = record({
+    plans: { p1: 'mounted' },
+    items: {
+      'note:n1': noteItem('note:n1', { title: 'Keep API', text: 'Do not rename.', size: 13 }),
+      'file:f1': fileItem('file:f1'),
+    },
+  })
+  const pending = {
+    added: {
+      'note:n1': { kind: 'note', id: 'note:n1', label: 'Keep API' },
+      'plan:p1': { kind: 'plan', id: 'p1', label: 'Plan one' },
+      'file:f1': { kind: 'file', id: 'file:f1', label: 'src/a.ts' },
+    },
+    removed: {
+      'note:old': { kind: 'note', id: 'note:old', label: 'Old note' },
+      'file:gone': { kind: 'file', id: 'file:gone', label: 'src/gone.ts' },
+    },
+  }
+  const update = t.composeUpdate({
+    pending,
+    record: rec,
+    docs,
+    config: cfg,
+    sawCompaction: true,
+    contents: { 'file:f1': { text: 'export const a = 1', truncated: false } },
+  })
+  assert.ok(update)
+  assert.match(update.text, /— update/)
+  assert.match(update.text, /Note "Old note" is no longer guarded\./)
+  assert.match(update.text, /File src\/gone\.ts is no longer guarded\./)
+  assert.ok(!/Note "Keep API" is no longer guarded/.test(update.text))
+  for (const expected of ['## Note: Keep API', 'Do not rename.', '## File: src/a.ts', 'export const a = 1', '## Plan: Plan one']) {
+    assert.match(update.text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.equal(update.added.length, 3)
+  assert.equal(update.removed.length, 2)
+})
+
+test('incremental update drops changes that no longer hold', () => {
+  const cfg = baseConfig()
+  const rec = record({ items: { 'note:n1': noteItem('note:n1', { mounted: false }) } })
+  const update = t.composeUpdate({
+    pending: { added: { 'note:n1': { kind: 'note', id: 'note:n1', label: 'A' } }, removed: {} },
+    record: rec,
+    docs: [],
+    config: cfg,
+    sawCompaction: true,
+    contents: {},
+  })
+  assert.equal(update, undefined)
+
+  const readded = t.composeUpdate({
+    pending: { added: {}, removed: { 'note:n1': { kind: 'note', id: 'note:n1', label: 'A' } } },
+    record: record({ items: { 'note:n1': noteItem('note:n1') } }),
+    docs: [],
+    config: cfg,
+    sawCompaction: true,
+    contents: {},
+  })
+  assert.equal(readded, undefined, 'a removal that was undone reports nothing')
+})
+
+test('incremental update respects the total cap', () => {
+  const cfg = { ...baseConfig(), maxTotalChars: 5000, maxCharsPerNote: 2000 }
+  const items = {}
+  const added = {}
+  for (let i = 0; i < 6; i += 1) {
+    const id = `note:n${i}`
+    items[id] = noteItem(id, { title: `Note ${i}`, text: 'y'.repeat(1400), size: 1400, createdAt: i })
+    added[id] = { kind: 'note', id, label: `Note ${i}` }
+  }
+  const update = t.composeUpdate({
+    pending: { added, removed: {} },
+    record: record({ items }),
+    docs: [],
+    config: cfg,
+    sawCompaction: true,
+    contents: {},
+  })
+  assert.ok(update)
+  assert.match(update.text, /omitted over the total cap:/)
+  assert.ok(update.added.length < 6)
+})

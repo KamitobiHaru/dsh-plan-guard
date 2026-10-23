@@ -34,29 +34,26 @@ window.__ModuleLoader__.load({
         'meta.title': 'Guarded context',
         'meta.description': 'Pin plans, notes, and files so they stay model-visible after context compaction.',
         'drawer.title': 'Guarded context',
+        'drawer.tabTitle': 'Guarded',
         'guide.title': 'Guarded context',
         'guide.description': 'Open the guarded-context drawer for this Session.',
         'common.loading': 'Loading…',
         'common.failed': 'Guarded context failed to load.',
         'common.unavailable': 'This Session is not live in the Host. Resume it to manage guarded context.',
         'policy.label': 'Model permission',
-        'policy.hint': 'Applies to model actions only. You can always change guarded context yourself.',
         'policy.ask': 'Ask every time',
         'policy.allowMount': 'Allow mounting',
         'policy.allowUnmount': 'Allow unmounting',
         'policy.allowAll': 'Allow everything',
         'policy.denyAll': 'Do not allow',
-        'request.hint': 'When a model action needs permission, a question appears in the conversation.',
-        'compaction.hint': 'Mounted content is re-injected after the next successful context compaction.',
         'plans.section': 'Plans',
-        'plans.empty': 'No plan documents yet. Submit a plan and it will appear here.',
+        'plans.empty': 'No plans yet.',
         'plans.auto': 'Auto',
         'plans.awaiting': 'Auto after first compaction',
         'plans.followAuto': 'Follow auto',
         'plans.explicitMounted': 'Mounted by you',
         'plans.explicitUnmounted': 'Unmounted by you',
         'plans.notAuto': 'Not auto-mounted',
-        'plans.userControlled': 'User-controlled',
         'plans.size': '{chars} chars',
         'plans.mountHint': 'Mount this plan',
         'plans.unmountHint': 'Unmount this plan',
@@ -67,7 +64,7 @@ window.__ModuleLoader__.load({
         'items.kindNote': 'Note',
         'items.expand': 'Show content',
         'items.collapse': 'Hide content',
-        'items.empty': 'No pinned notes or files yet.',
+        'items.empty': 'Nothing pinned yet.',
         'items.limit': '{count} of {max} items',
         'items.mounted': 'Mounted',
         'items.unmounted': 'Unmounted',
@@ -80,9 +77,7 @@ window.__ModuleLoader__.load({
         'items.cancel': 'Cancel',
         'items.addedByHuman': 'human',
         'items.addedByModel': 'model',
-        'items.meta': '{state} · added by {by} · {size} chars',
-        'items.lockHint': 'A locked item cannot be mounted or unmounted by the model.',
-        'items.deleteHint': 'Deleting removes the item for good. Only you can delete items.',
+        'items.meta': '{kind} · {state} · {by} · {size} chars',
         'items.mountHint': 'Mount this item',
         'items.unmountHint': 'Unmount this item',
         'items.contentError': 'This content could not be read:',
@@ -106,29 +101,26 @@ window.__ModuleLoader__.load({
         'meta.title': '上下文守护',
         'meta.description': '守护计划、备注与文件，让它们在上下文压缩后继续可见。',
         'drawer.title': '上下文守护',
+        'drawer.tabTitle': '守护',
         'guide.title': '上下文守护',
         'guide.description': '打开当前会话的守护上下文抽屉。',
         'common.loading': '正在加载……',
         'common.failed': '守护上下文加载失败。',
         'common.unavailable': '该会话当前不在宿主中运行。恢复会话后即可管理守护上下文。',
         'policy.label': '模型权限',
-        'policy.hint': '只约束模型动作；你本人始终可以修改守护上下文。',
         'policy.ask': '每次询问',
         'policy.allowMount': '允许挂载',
         'policy.allowUnmount': '允许卸载',
         'policy.allowAll': '允许全部',
         'policy.denyAll': '不允许',
-        'request.hint': '模型动作需要权限时，对话中会出现一个问题卡片。',
-        'compaction.hint': '已挂载内容会在下一次成功压缩后重新注入。',
         'plans.section': '计划',
-        'plans.empty': '还没有计划文档。提交一个计划后就会出现在这里。',
+        'plans.empty': '还没有计划。',
         'plans.auto': '自动',
         'plans.awaiting': '首次压缩后自动挂载',
         'plans.followAuto': '恢复自动',
         'plans.explicitMounted': '由你挂载',
         'plans.explicitUnmounted': '由你卸下',
         'plans.notAuto': '不自动挂载',
-        'plans.userControlled': '人类控制',
         'plans.size': '{chars} 字符',
         'plans.mountHint': '挂载这份计划',
         'plans.unmountHint': '卸下这份计划',
@@ -139,7 +131,7 @@ window.__ModuleLoader__.load({
         'items.kindNote': '备注',
         'items.expand': '展开内容',
         'items.collapse': '收起内容',
-        'items.empty': '还没有固定的备注或文件。',
+        'items.empty': '还没有固定任何内容。',
         'items.limit': '{count}/{max} 条',
         'items.mounted': '已挂载',
         'items.unmounted': '未挂载',
@@ -152,9 +144,7 @@ window.__ModuleLoader__.load({
         'items.cancel': '取消',
         'items.addedByHuman': '人类',
         'items.addedByModel': '模型',
-        'items.meta': '{state} · 由{by}添加 · {size} 字符',
-        'items.lockHint': '锁定后模型不能挂载或卸载该条目。',
-        'items.deleteHint': '删除会永久移除该条目；只有人类可以删除。',
+        'items.meta': '{kind} · {state} · {by} · {size} 字符',
         'items.mountHint': '挂载这个条目',
         'items.unmountHint': '卸载这个条目',
         'items.contentError': '无法读取该内容：',
@@ -176,89 +166,293 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /** Localized theme-token styles; literal colors are fallbacks only. */
-    const styles = {
-      container: {
-        display: 'flex', flexDirection: 'column', gap: 16, padding: '12px 14px',
-        fontSize: 13, lineHeight: 1.45, color: 'var(--dsw-alias-text-primary, inherit)',
+    /**
+     * Drawer stylesheet, installed once per page. Every color, radius and font
+     * comes from the live theme tokens, so light and dark both follow the host;
+     * literal values appear only as fallbacks for a token a theme omits.
+     */
+    const CSS = String.raw`
+.pg-root {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  padding: 12px 14px 24px;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: var(--dsw-font-xs-13);
+}
+.pg-caption {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxxs-11);
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.pg-count {
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxs-12);
+  white-space: nowrap;
+}
+.pg-policy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pg-select {
+  box-sizing: border-box;
+  height: 28px;
+  max-width: 62%;
+  padding: 0 26px 0 10px;
+  border: .5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background-color: var(--dsw-alias-bg-layer-1);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 9px center;
+  background-repeat: no-repeat;
+  background-size: 11px 11px;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  cursor: pointer;
+  appearance: none;
+}
+.pg-select:focus-visible,
+.pg-input:focus-visible,
+.pg-textarea:focus-visible,
+.pg-title:focus-visible,
+.pg-btn:focus-visible,
+.pg-switch:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+.pg-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.pg-sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pg-card {
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: .5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-xl);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.pg-card:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.pg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.pg-title {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.pg-meta {
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxs-12);
+}
+.pg-path {
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxs-12);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  word-break: break-all;
+}
+.pg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.pg-btn {
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 10px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  cursor: pointer;
+}
+.pg-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.pg-btn:disabled {
+  opacity: .5;
+  cursor: default;
+}
+.pg-btn-primary {
+  border-color: transparent;
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+.pg-btn-primary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-button-primary-fill));
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+.pg-btn-danger {
+  color: var(--dsw-alias-state-error-primary, #b45353);
+}
+.pg-btn-danger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary, #b45353);
+}
+.pg-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l3, rgba(127,127,127,.45));
+  cursor: pointer;
+  transition: background-color .12s;
+}
+.pg-switch[aria-checked="true"] {
+  background: var(--dsw-alias-state-business-primary);
+}
+.pg-switch:disabled {
+  opacity: .5;
+  cursor: default;
+}
+.pg-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--dsw-static-neutral-bluish-00, #fff);
+  transition: transform .12s;
+}
+.pg-switch[aria-checked="true"] .pg-knob {
+  transform: translateX(14px);
+}
+.pg-doc {
+  margin: 0;
+  max-height: 320px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: .5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pg-form {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: .5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-xl);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.pg-input,
+.pg-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  border: .5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  padding: 0 10px;
+}
+.pg-input {
+  height: 28px;
+}
+.pg-textarea {
+  min-height: 72px;
+  padding: 6px 10px;
+  resize: vertical;
+}
+.pg-input::placeholder,
+.pg-textarea::placeholder {
+  color: var(--dsw-alias-label-dimmed, inherit);
+}
+.pg-input:focus,
+.pg-textarea:focus {
+  border-color: var(--dsw-alias-state-business-primary);
+  outline: none;
+}
+.pg-empty {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxs-12);
+}
+.pg-error {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary, #b45353);
+  font: var(--dsw-font-xxs-12);
+  white-space: pre-wrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-switch,
+  .pg-knob {
+    transition: none;
+  }
+}
+`
+
+    /** Install the drawer stylesheet once per page; the disposer removes it. */
+    function ensureStyles() {
+      if (typeof document === 'undefined') return () => {}
+      if (document.querySelector('style[data-plan-guard]') !== null) return () => {}
+      const element = document.createElement('style')
+      element.setAttribute('data-plan-guard', '')
+      element.textContent = CSS
+      document.head.appendChild(element)
+      return () => { element.remove() }
+    }
+
+    /** Tab glyph: a document with a check, drawn in the chip's own color. */
+    function GuardedIcon({ size = 16 }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true',
       },
-      header: { display: 'flex', flexDirection: 'column', gap: 6 },
-      title: { margin: 0, fontSize: 14, fontWeight: 600 },
-      hint: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-text-secondary, inherit)' },
-      section: { display: 'flex', flexDirection: 'column', gap: 6 },
-      sectionTitle: {
-        margin: 0, fontSize: 12, fontWeight: 600, textTransform: 'uppercase',
-        letterSpacing: '0.04em', color: 'var(--dsw-alias-text-secondary, inherit)',
-      },
-      row: {
-        display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 0',
-        borderBottom: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.2))',
-      },
-      rowBody: { display: 'flex', flexDirection: 'column', gap: 3, flex: 1, minWidth: 0 },
-      rowTitle: {
-        margin: 0, padding: 0, border: 0, background: 'none', color: 'inherit',
-        font: 'inherit', fontWeight: 500, textAlign: 'left', cursor: 'pointer', overflowWrap: 'anywhere',
-      },
-      meta: { fontSize: 11, color: 'var(--dsw-alias-text-secondary, inherit)' },
-      path: {
-        fontSize: 11, color: 'var(--dsw-alias-text-secondary, inherit)',
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all',
-      },
-      controls: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-      badge: {
-        fontSize: 10, padding: '1px 6px', borderRadius: 999,
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.3))',
-        color: 'var(--dsw-alias-text-secondary, inherit)', whiteSpace: 'nowrap',
-      },
-      button: {
-        padding: '3px 8px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.35))',
-        background: 'var(--dsw-alias-bg-secondary, transparent)', color: 'inherit', font: 'inherit', cursor: 'pointer',
-      },
-      danger: {
-        borderColor: 'var(--dsw-alias-border-danger, #b45353)',
-        color: 'var(--dsw-alias-text-danger, #b45353)',
-      },
-      select: {
-        padding: '3px 6px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.35))',
-        background: 'var(--dsw-alias-bg-secondary, transparent)', color: 'inherit', font: 'inherit',
-      },
-      input: {
-        boxSizing: 'border-box', width: '100%', padding: '5px 7px', borderRadius: 6,
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.35))',
-        background: 'var(--dsw-alias-bg-secondary, transparent)', color: 'inherit', font: 'inherit',
-      },
-      textarea: {
-        boxSizing: 'border-box', width: '100%', minHeight: 72, resize: 'vertical', padding: '5px 7px', borderRadius: 6,
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.35))',
-        background: 'var(--dsw-alias-bg-secondary, transparent)', color: 'inherit', font: 'inherit',
-      },
-      form: {
-        display: 'flex', flexDirection: 'column', gap: 6, padding: 8,
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.25))', borderRadius: 8,
-      },
-      note: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-text-secondary, inherit)' },
-      error: {
-        margin: 0, padding: '6px 8px', borderRadius: 6, fontSize: 12, whiteSpace: 'pre-wrap',
-        border: '1px solid var(--dsw-alias-border-danger, #b45353)',
-        color: 'var(--dsw-alias-text-danger, #b45353)',
-      },
-      document: {
-        margin: 0, padding: 8, maxHeight: 320, overflow: 'auto', borderRadius: 6,
-        background: 'var(--dsw-alias-bg-secondary, transparent)',
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.25))',
-        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12,
-      },
-      switch: (on) => ({
-        position: 'relative', width: 30, height: 17, flex: '0 0 auto', padding: 0, borderRadius: 999,
-        border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.4))',
-        background: on ? 'var(--dsw-alias-accent, #3b7f5f)' : 'transparent', cursor: 'pointer',
+      h('rect', { x: 2.5, y: 1.5, width: 7.5, height: 13, rx: 1.6, stroke: 'currentColor', strokeWidth: 1.1 }),
+      h('path', {
+        d: 'M4.5 5h3.5M4.5 7.5h3.5M4.5 10h2',
+        stroke: 'currentColor', strokeWidth: 1.1, strokeLinecap: 'round',
       }),
-      knob: (on) => ({
-        position: 'absolute', top: 2, left: on ? 15 : 2, width: 11, height: 11, borderRadius: 999,
-        background: on ? 'var(--dsw-alias-bg-primary, #fff)' : 'var(--dsw-alias-text-secondary, rgba(127,127,127,0.7))',
-        transition: 'left 120ms ease',
-      }),
+      h('path', {
+        d: 'M9.5 11.2l1.7 1.8 2.8-3.4',
+        stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+      }))
     }
 
     const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -389,17 +583,13 @@ window.__ModuleLoader__.load({
       ],
     }
 
-    /** Accessible native switch. */
+    /** Accessible switch; the framework owns colors through the stylesheet. */
     function Switch({ checked, busy, label, onChange }) {
       return h('button', {
         type: 'button', role: 'switch', 'aria-checked': checked, 'aria-label': label,
-        disabled: busy === true, style: styles.switch(checked),
+        disabled: busy === true, className: 'pg-switch',
         onClick: () => { if (busy !== true) onChange(!checked) },
-      }, h('span', { style: styles.knob(checked) }))
-    }
-
-    function Badge({ children }) {
-      return h('span', { style: styles.badge }, children)
+      }, h('span', { className: 'pg-knob' }))
     }
 
     function PlanRow({ plan, busy, expanded, onToggle, onAuto, onExpand, t }) {
@@ -409,63 +599,62 @@ window.__ModuleLoader__.load({
       else if (plan.auto) stateLabel = t('plans.auto')
       else if (plan.awaitingCompaction) stateLabel = t('plans.awaiting')
       else stateLabel = t('plans.notAuto')
-      return h('div', { style: styles.row },
+      const meta = [
+        stateLabel,
+        t('plans.size').replace('{chars}', String(plan.size)),
+        typeof plan.turn === 'number' ? 'turn ' + String(plan.turn) : undefined,
+      ].filter(part => typeof part === 'string' && part !== '').join(' · ')
+      return h('div', { className: 'pg-card' },
         h(Switch, {
           checked: plan.mounted, busy,
           label: t(plan.mounted ? 'plans.unmountHint' : 'plans.mountHint'),
           onChange: onToggle,
         }),
-        h('div', { style: styles.rowBody },
+        h('div', { className: 'pg-body' },
           h('button', {
-            type: 'button', style: styles.rowTitle, title: t(expanded ? 'plans.collapse' : 'plans.expand'),
+            type: 'button', className: 'pg-title', title: t(expanded ? 'plans.collapse' : 'plans.expand'),
             onClick: onExpand,
           }, plan.title),
-          h('div', { style: styles.meta },
-            `${stateLabel} · ${t('plans.size').replace('{chars}', String(plan.size))}`
-            + (typeof plan.turn === 'number' ? ` · turn ${plan.turn}` : '')),
-          h('div', { style: styles.controls },
-            h(Badge, {}, t('plans.userControlled')),
-            plan.explicit !== null && plan.autoEligible
-              ? h('button', { type: 'button', style: styles.button, disabled: busy, onClick: onAuto }, t('plans.followAuto'))
-              : null,
-          ),
+          h('div', { className: 'pg-meta' }, meta),
+          plan.explicit !== null && plan.autoEligible
+            ? h('div', { className: 'pg-actions' },
+              h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onAuto }, t('plans.followAuto')))
+            : null,
         ),
       )
     }
 
     function ItemRow({ item, busy, expanded, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, t }) {
-      const by = item.createdBy === 'human' ? t('items.addedByHuman') : t('items.addedByModel')
+      const stateLabel = item.mounted ? t('items.mounted') : t('items.unmounted')
       const meta = t('items.meta')
-        .replace('{state}', item.mounted ? t('items.mounted') : t('items.unmounted'))
-        .replace('{by}', by)
+        .replace('{kind}', item.kind === 'file' ? t('items.kindFile') : t('items.kindNote'))
+        .replace('{state}', item.locked ? stateLabel + ' · ' + t('items.locked') : stateLabel)
+        .replace('{by}', item.createdBy === 'human' ? t('items.addedByHuman') : t('items.addedByModel'))
         .replace('{size}', String(item.size))
-      return h('div', { style: styles.row },
+      return h('div', { className: 'pg-card' },
         h(Switch, {
           checked: item.mounted, busy,
           label: t(item.mounted ? 'items.unmountHint' : 'items.mountHint'),
           onChange: onToggle,
         }),
-        h('div', { style: styles.rowBody },
+        h('div', { className: 'pg-body' },
           h('button', {
-            type: 'button', style: styles.rowTitle, title: t(expanded ? 'items.collapse' : 'items.expand'),
+            type: 'button', className: 'pg-title', title: t(expanded ? 'items.collapse' : 'items.expand'),
             onClick: onExpand,
           }, item.title),
-          item.kind === 'file' && item.path !== null ? h('div', { style: styles.path }, item.path) : null,
-          h('div', { style: styles.meta }, meta),
-          h('div', { style: styles.controls },
-            h(Badge, {}, item.kind === 'file' ? t('items.kindFile') : t('items.kindNote')),
-            h(Badge, {}, item.locked ? t('items.locked') : t('items.unlocked')),
+          item.kind === 'file' && item.path !== null ? h('div', { className: 'pg-path' }, item.path) : null,
+          h('div', { className: 'pg-meta' }, meta),
+          h('div', { className: 'pg-actions' },
             h('button', {
-              type: 'button', style: styles.button, disabled: busy,
-              'aria-pressed': item.locked, title: t('items.lockHint'),
+              type: 'button', className: 'pg-btn', disabled: busy,
+              'aria-pressed': item.locked,
               onClick: () => onLock(!item.locked),
             }, item.locked ? t('items.unlock') : t('items.lock')),
             deleteConfirm
-              ? h('span', { style: styles.controls },
-                h('button', { type: 'button', style: { ...styles.button, ...styles.danger }, disabled: busy, onClick: onConfirmDelete }, t('items.deleteConfirm')),
-                h('button', { type: 'button', style: styles.button, disabled: busy, onClick: onCancelDelete }, t('items.cancel')),
-              )
-              : h('button', { type: 'button', style: styles.button, disabled: busy, title: t('items.deleteHint'), onClick: onDelete }, t('items.delete')),
+              ? h(React.Fragment, null,
+                h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onConfirmDelete }, t('items.deleteConfirm')),
+                h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onCancelDelete }, t('items.cancel')))
+              : h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onDelete }, t('items.delete')),
           ),
         ),
       )
@@ -473,22 +662,22 @@ window.__ModuleLoader__.load({
 
     function ContentBlock({ content, t }) {
       if (content === undefined || content.status === 'loading') {
-        return h('p', { style: styles.note }, t('content.loading'))
+        return h('p', { className: 'pg-empty' }, t('content.loading'))
       }
       if (content.status === 'failed') {
-        return h('p', { style: styles.error }, `${t('content.failed')} ${content.error ?? ''}`)
+        return h('p', { className: 'pg-error' }, `${t('content.failed')} ${content.error ?? ''}`)
       }
       const value = content.value
-      if (!isRecord(value)) return h('p', { style: styles.note }, t('content.unavailable'))
+      if (!isRecord(value)) return h('p', { className: 'pg-empty' }, t('content.unavailable'))
       if (value.error !== null && value.error !== undefined) {
-        return h('p', { style: styles.error }, `${t('items.contentError')} ${value.error}`)
+        return h('p', { className: 'pg-error' }, `${t('items.contentError')} ${value.error}`)
       }
       const meta = [value.kind, value.title, value.truncated === true ? t('content.truncated') : undefined]
         .filter(part => typeof part === 'string' && part !== '')
         .join(' · ')
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
-        meta === '' ? null : h('div', { style: styles.meta }, meta),
-        h('pre', { style: styles.document }, String(value.text ?? '')),
+      return h('div', { className: 'pg-body' },
+        meta === '' ? null : h('div', { className: 'pg-meta' }, meta),
+        h('pre', { className: 'pg-doc' }, String(value.text ?? '')),
       )
     }
 
@@ -568,14 +757,14 @@ window.__ModuleLoader__.load({
         }
       }
 
-      if (resource.status === 'loading') return h('p', { style: styles.note }, t('common.loading'))
+      if (resource.status === 'loading') return h('p', { className: 'pg-empty' }, t('common.loading'))
       if (resource.status === 'failed') {
-        return h('p', { style: styles.error, role: 'status' },
+        return h('p', { className: 'pg-error', role: 'status' },
           `${t('common.failed')} ${String(resource.failure?.message ?? '')}`)
       }
-      if (resource.status === 'none') return h('p', { style: styles.note }, t('common.failed'))
-      if (state === undefined) return h('p', { style: styles.note }, t('common.loading'))
-      if (state.live === false) return h('p', { style: styles.note }, t('common.unavailable'))
+      if (resource.status === 'none') return h('p', { className: 'pg-empty' }, t('common.failed'))
+      if (state === undefined) return h('p', { className: 'pg-empty' }, t('common.loading'))
+      if (state.live === false) return h('p', { className: 'pg-empty' }, t('common.unavailable'))
 
       const plans = Array.isArray(state.plans) ? state.plans : []
       const items = Array.isArray(state.items) ? state.items : []
@@ -613,88 +802,86 @@ window.__ModuleLoader__.load({
       }))
 
       const addForm = addKind === 'note'
-        ? h('div', { style: styles.form },
+        ? h('div', { className: 'pg-form' },
           h('input', {
-            style: styles.input, value: noteTitle, maxLength: 200,
+            className: 'pg-input', value: noteTitle, maxLength: 200,
             placeholder: t('add.titlePlaceholder'), 'aria-label': t('add.noteTitle'),
             onChange: event => setNoteTitle(event.target.value),
           }),
           h('textarea', {
-            style: styles.textarea, value: noteText, maxLength: noteMax,
+            className: 'pg-textarea', value: noteText, maxLength: noteMax,
             placeholder: t('add.notePlaceholder'), 'aria-label': t('add.noteText'),
             onChange: event => setNoteText(event.target.value),
           }),
-          h('div', { style: styles.controls },
+          h('div', { className: 'pg-actions' },
             h('button', {
-              type: 'button', style: styles.button,
+              type: 'button', className: 'pg-btn pg-btn-primary',
               disabled: busy === 'add-note' || noteText.trim() === '',
               onClick: () => { void submitNote() },
             }, t('add.submit')),
             h('button', {
-              type: 'button', style: styles.button, disabled: busy === 'add-note',
+              type: 'button', className: 'pg-btn', disabled: busy === 'add-note',
               onClick: () => { setAddKind(undefined) },
             }, t('add.cancel')),
           ),
         )
         : addKind === 'file'
-          ? h('div', { style: styles.form },
+          ? h('div', { className: 'pg-form' },
             h('input', {
-              style: styles.input, value: filePath, maxLength: 4096,
+              className: 'pg-input', value: filePath, maxLength: 4096,
               placeholder: t('add.filePlaceholder'), 'aria-label': t('add.filePath'),
               onChange: event => setFilePath(event.target.value),
             }),
-            h('div', { style: styles.controls },
+            h('div', { className: 'pg-actions' },
               h('button', {
-                type: 'button', style: styles.button,
+                type: 'button', className: 'pg-btn pg-btn-primary',
                 disabled: busy === 'add-file' || filePath.trim() === '',
                 onClick: () => { void submitFile() },
               }, t('add.submit')),
               h('button', {
-                type: 'button', style: styles.button, disabled: busy === 'add-file',
+                type: 'button', className: 'pg-btn', disabled: busy === 'add-file',
                 onClick: () => { setAddKind(undefined) },
               }, t('add.cancel')),
             ),
           )
-          : h('div', { style: styles.controls },
+          : h('div', { className: 'pg-actions' },
             h('button', {
-              type: 'button', style: styles.button, disabled: busy !== undefined,
+              type: 'button', className: 'pg-btn', disabled: busy !== undefined,
               onClick: () => { setAddKind('note'); setError(undefined) },
             }, t('add.note')),
             h('button', {
-              type: 'button', style: styles.button, disabled: busy !== undefined,
+              type: 'button', className: 'pg-btn', disabled: busy !== undefined,
               onClick: () => { setAddKind('file'); setError(undefined) },
             }, t('add.file')),
           )
 
-      return h('div', { style: styles.container },
-        error === undefined ? null : h('p', { style: styles.error, role: 'alert' }, `${t('row.error')} ${error}`),
-        h('div', { style: styles.header },
-          h('h2', { style: styles.title }, t('drawer.title')),
-          h('div', { style: styles.controls },
-            h('label', { style: styles.meta, htmlFor: 'plan-guard-policy' }, t('policy.label')),
-            h('select', {
-              id: 'plan-guard-policy', style: styles.select, value: policy, disabled: busy === 'policy',
-              onChange: event => { void run('policy', () => api.setPolicy(event.target.value)) },
-            }, POLICY_OPTIONS.map(option => h('option', { key: option.value, value: option.value }, t(option.key)))),
-          ),
-          h('p', { style: styles.hint }, t('policy.hint')),
-          h('p', { style: styles.hint }, t('request.hint')),
-          h('p', { style: styles.hint }, t('compaction.hint')),
+      return h('div', { className: 'pg-root' },
+        error === undefined ? null : h('p', { className: 'pg-error', role: 'alert' }, `${t('row.error')} ${error}`),
+        h('div', { className: 'pg-policy' },
+          h('label', { className: 'pg-caption', htmlFor: 'plan-guard-policy' }, t('policy.label')),
+          h('select', {
+            id: 'plan-guard-policy', className: 'pg-select', value: policy, disabled: busy === 'policy',
+            'aria-label': t('policy.label'),
+            onChange: event => { void run('policy', () => api.setPolicy(event.target.value)) },
+          }, POLICY_OPTIONS.map(option => h('option', { key: option.value, value: option.value }, t(option.key)))),
         ),
-        h('section', { style: styles.section },
-          h('h3', { style: styles.sectionTitle }, t('plans.section')),
-          plans.length === 0 ? h('p', { style: styles.note }, t('plans.empty')) : planRows,
+        h('section', { className: 'pg-section' },
+          h('div', { className: 'pg-sectionHead' },
+            h('h3', { className: 'pg-caption' }, t('plans.section')),
+            plans.length === 0 ? null : h('span', { className: 'pg-count' }, String(plans.length)),
+          ),
+          plans.length === 0 ? h('p', { className: 'pg-empty' }, t('plans.empty')) : planRows,
           expanded !== undefined && plans.some(plan => plan.callId === expanded)
             ? h(ContentBlock, { content, t })
             : null,
         ),
-        h('section', { style: styles.section },
-          h('h3', { style: styles.sectionTitle },
-            t('items.section'),
-            ' ',
-            h('span', { style: styles.meta }, t('items.limit').replace('{count}', String(items.length)).replace('{max}', String(itemMax))),
+        h('section', { className: 'pg-section' },
+          h('div', { className: 'pg-sectionHead' },
+            h('h3', { className: 'pg-caption' }, t('items.section')),
+            h('span', { className: 'pg-count' },
+              t('items.limit').replace('{count}', String(items.length)).replace('{max}', String(itemMax))),
           ),
-          items.length === 0 ? h('p', { style: styles.note }, t('items.empty')) : itemRows,
+          items.length === 0 ? h('p', { className: 'pg-empty' }, t('items.empty')) : itemRows,
           expanded !== undefined && items.some(item => item.id === expanded)
             ? h(ContentBlock, { content, t })
             : null,
@@ -721,6 +908,7 @@ window.__ModuleLoader__.load({
       const remote = ctx.remote[REMOTE_NS]
 
       ctx.effect(() => ctx.locale.register(LOCALE_NS, DICTS), 'dsh-plan-guard: dictionaries')
+      ctx.effect(() => ensureStyles(), 'dsh-plan-guard: drawer styles')
       ctx.effect(
         () => ctx.resources.register({
           protocol: TAB_KIND,
@@ -732,12 +920,13 @@ window.__ModuleLoader__.load({
         () => ctx.sidebarRightTabs.register({
           id: PLUGIN_ID,
           kind: TAB_KIND,
-          title: () => t('drawer.title'),
+          title: () => t('drawer.tabTitle'),
           guide: [{
             id: 'guarded-context',
             order: 20,
             title: () => t('guide.title'),
             description: () => t('guide.description'),
+            icon: GuardedIcon,
           }],
         }),
         'dsh-plan-guard: sidebar tab type',

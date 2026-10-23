@@ -9,7 +9,10 @@
 | 会话日志 | 每个 session 在 `<DSH_HOME>/sessions/<项目>/<sessionId>/<version>.jsonl` 的追加式事件记录 |
 | surface | 模型每一步真正看到的输入区间；压缩=把一段事件替换成摘要检查点，被替换事件仍在日志 |
 | Plan 文档 | 本会话日志里一次 `exit_plan_mode` 提交的 plan markdown，按 callId 取一条 |
-| 守护上下文 | Plan + 备注 + 文件的集合；压缩后由插件重新注入 |
+| 守护上下文 | Plan + 备注 + 文件的集合；由插件按快照/增量注入 |
+| pending 日记 | 记录里 `{added, removed}` 两张表，记未送达的挂载/卸载/增删，按条目 key 合并 |
+| 快照 | surface 上没有守护消息时发的整份内容（首次、每次压缩后） |
+| 增量 | 已可见时发的小消息：新增发正文，卸载/删除发一句 no longer guarded |
 | 条目 | 人类或模型添加的备注/文件，有 mounted/locked/createdBy |
 | 权限模式 | 会话级，只约束模型：ask / allow-mount / allow-unmount / allow-all / deny-all |
 | 锁定 | 条目级布尔值；锁定后模型不能挂载/卸载，人类仍可改 |
@@ -24,6 +27,8 @@
 5. 模型可添加文件 + 文字备注。
 6. 模型**不能删除任何条目**（自己的也不行，审计保留）；只能卸载；删除仅人类。
 7. 权限模式五种；人类动作永远允许。
+8. 注入不等压缩：新增立刻（下一步）可见，卸载只加一行提示，压缩后发快照；所有注入都是尾部追加，不改写历史（KV cache 前缀不失效）。
+9. 界面上不写说明书：抽屉只留标签、状态、按钮；说明放在 README 与 guide 卡片的一行描述里。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -40,26 +45,39 @@
     静态 `inject` 里写 `remote.<ns>` 会让 fiber 永久 pending（命名空间正是自己的 apply 创建的）；
     不在任何 inject 组里直接读 `ctx.remote[ns]` 会抛 `cannot get property "remote.<ns>" without inject`，
     该异常会让 Client 条目进入 failed，整页显示 “Failed to load plugins”（0.2.4 修复）。
+11. `decision.messages` 只是本步新 claim 的批次（`dsh-agent-loop/lib/index.js:904-920`），
+    step 里逐条 `session.append('user/message', …, {surfaceOp:'append'})`（`:1061`）。
+    所以「插在最后一条 claimed 之后」就是请求尾部、runtime-context 之前：纯追加，缓存友好。
+12. 抽屉视觉必须用 Theme 实况 token：`--dsw-alias-label-*`、`--dsw-alias-border-l1..l4`、
+    `--dsw-alias-bg-layer-1/2`、`--dsw-alias-state-business-primary`、`--dsw-radius-*`、`--dsw-font-*`。
+    早期用的 `--dsw-alias-text-primary` 等并不存在，全部回退成继承/透明（0.3.0 修复）。
 
 ## 实施状态
 
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（22 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（31 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
-- [ ] 活会话验收（压缩后注入、权限矩阵、问题卡片、抽屉轮询刷新）
+- [x] 真实回合验收（0.3.0，临时安装 + 无头 Chrome + 真模型）：
+      首轮注入快照（未压缩也发）、抽屉加备注后下一轮注入 `— update` + 正文、卸载后下一轮只注入一行
+      `Note "E2E marker" is no longer guarded.`，三次注入都不重复
+- [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
+- [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
 ## 端到端数据流
 
 1. 模型提交 plan（原生或 PTC）→ projection `plan-guard-docs` 记 `{callId,title,size,turn,markdown(≤64k)}`；
    首次成功 `compaction/end` 把 `sawCompaction` 置真。
-2. 抽屉/工具 → storage domain `plan-guard` 表 `sessions`，按 sessionId 一条记录：
-   `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}}`。
-3. 首次成功压缩后的 pre-step：取 projection + 记录 → 生效 Plan（最新自动，除非显式卸下）
-   + 已挂载条目 → 实时读文件（上限/标记）→ 拼一条 user 消息 splice 进 `decision.messages`。
+2. 抽屉/工具 → storage domain `plan_guard` 表 `sessions`，按 sessionId 一条记录：
+   `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}, pending:{added,removed}}`。
+   每次改挂载状态都往 pending 记一条（按条目合并，add/remove 互相抵消）。
+3. pre-step：surface 上没有守护消息 → 取 projection + 记录 → 生效 Plan（最新自动，除非显式卸下）
+   + 已挂载条目 → 实时读文件（上限/标记）→ 拼快照并清 pending；
+   否则若有 pending → 只拼增量（新增正文 / 卸载一行）→ 发完按 key 清 pending。
+   两种消息都 splice 在 `lastClaimed + 1`，即请求尾部。
 4. 抽屉走 `dsh-resource://plan-guard-drawer/<sessionId>` 资源（3s 轮询）→ `plan-guard/list` 等 9 个 SRC 方法。
 5. 模型 `context_guard`：list/add_file/add_note/mount/unmount；权限矩阵 + 条目锁定 + ask 卡片；
    写入前重新读记录复核，避免 ask 期间状态变化。
@@ -79,8 +97,9 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（22/22）。
-- 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome 抓取启动失败（0.2.4 前可复现 Client 条目 failed）。
-- 未跑：真实注入、问题卡片、压缩矩阵、重启/恢复自愈。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（31/31）。
+- 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome（浅/深色截图、抽屉增删挂载、guide 图标、控制台零报错）。
+- 已跑：真实模型回合三条注入（快照 / 新增增量 / 卸载一行），直接读会话 jsonl 核对。
+- 未跑：压缩时刻、问题卡片、权限矩阵、重启/恢复自愈。
 - 后续：`plugin_manager install_bundle` → 重启 → `cordis_inspect_query` Tool/Slots →
   抽屉矩阵 → 工具权限矩阵 → `dsh-compaction-tune` 强制压缩（`set-ratio.mjs 0.01 --retain 0.0005`，测试后恢复）→ 重启/恢复自愈。

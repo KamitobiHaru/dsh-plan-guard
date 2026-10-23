@@ -12,7 +12,27 @@ async function loadClientModule() {
       load(value) { entry = value },
     },
   }
-  vm.runInContext(source, vm.createContext({ window, console }), { filename: 'client.js' })
+  const head = { children: [], appendChild(element) { this.children.push(element); return element } }
+  const document = {
+    querySelector(selector) {
+      assert.equal(selector, 'style[data-plan-guard]')
+      return head.children.find(element => element.attributes['data-plan-guard'] !== undefined) ?? null
+    },
+    createElement(tag) {
+      return {
+        tag,
+        attributes: {},
+        textContent: '',
+        setAttribute(name, value) { this.attributes[name] = value },
+        remove() {
+          const index = head.children.indexOf(this)
+          if (index >= 0) head.children.splice(index, 1)
+        },
+      }
+    },
+    head,
+  }
+  vm.runInContext(source, vm.createContext({ window, console, document }), { filename: 'client.js' })
   assert.equal(entry?.id, 'dsh-plan-guard')
 
   const React = {
@@ -30,7 +50,7 @@ async function loadClientModule() {
     if (specifier === 'react') return React
     throw new Error(`client module required an unseeded module: ${specifier}`)
   })
-  return { module, required }
+  return { module, required, head }
 }
 
 /** Minimal Client context: enough of the registration surface for apply(). */
@@ -39,7 +59,9 @@ function fakeContext(captured) {
   const remote = new Proxy({}, { get: () => async () => ({ ok: true }) })
   const effect = (callback) => {
     const disposer = callback()
-    return typeof disposer === 'function' ? disposer : () => {}
+    const cleanup = typeof disposer === 'function' ? disposer : () => {}
+    captured.effects.push(cleanup)
+    return cleanup
   }
   const slots = {
     inject: (_name, callback) => callback(),
@@ -89,7 +111,7 @@ function assertStrictCodec(codec, subject) {
 }
 
 test('client module imports only seeded modules and mounts valid descriptors', async () => {
-  const { module, required } = await loadClientModule()
+  const { module, required, head } = await loadClientModule()
   assert.deepEqual(required, ['react'])
   assert.deepEqual([...module.inject], ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'])
 
@@ -101,9 +123,20 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.equal(sessionIdOfAddress(drawerAddress('a b')), 'a b')
   assert.equal(sessionIdOfAddress('plan-guard-drawer://a'), undefined)
 
-  const captured = { slots: [], resources: [], tabs: [], injectGroups: [] }
+  const captured = { slots: [], resources: [], tabs: [], injectGroups: [], effects: [] }
   const disposeUi = await module.apply(fakeContext(captured))
   assert.equal(typeof disposeUi, 'function', 'apply must return the disposer joining UI and Remote')
+
+  // The drawer installs its own token-based stylesheet once and removes it on unload.
+  assert.equal(head.children.length, 1, 'exactly one stylesheet is installed')
+  assert.match(head.children[0].textContent, /\.pg-root/)
+  assert.match(head.children[0].textContent, /--dsw-alias-label-primary/)
+  assert.ok(!('policy.hint' in captured.locale.dictionaries), 'the drawer carries no instructional copy')
+  assert.ok(!('compaction.hint' in captured.locale.dictionaries))
+
+  // The guide capsule draws its own glyph instead of the placeholder cube.
+  assert.equal(typeof captured.tabs[0].guide[0].icon, 'function')
+
 
   // The plugin mounts its own Remote namespace, so that namespace can only be
   // readable inside a dynamic inject group. Joining it through the static
@@ -151,4 +184,6 @@ test('client module imports only seeded modules and mounts valid descriptors', a
 
   await disposeUi()
   assert.equal(captured.uiDisposed, true, 'the returned disposer drops the UI half')
+  for (const dispose of captured.effects.reverse()) await dispose()
+  assert.equal(head.children.length, 0, 'unloading removes the stylesheet')
 })
