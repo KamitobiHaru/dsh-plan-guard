@@ -953,9 +953,16 @@ function createOperations(ctx, domain, projections, sessions, config) {
   const prepareFile = async (agent, rawPath, title, signal) => {
     const fs = ctx.get('fs')
     if (fs === undefined) throw new Error('The filesystem service is unavailable; file items cannot be added.')
-    const wd = ctx.get('workingDirectory')
-    if (wd === undefined) throw new Error('The working-directory service is unavailable; file items cannot be added.')
-    const cwd = await wd.ensure(agent, signal)
+    // The `workingDirectory` service is gone from current runtimes; the live
+    // Session always carries its header, whose `cwd` is the absolute working
+    // directory the session was created in (dsh-session Session.header).
+    const sessionId = agent?.session?.id ?? agent?.id
+    const live = sessionId === undefined ? undefined : liveSession(sessionId)
+    const headerCwd = live?.header?.cwd ?? agent?.session?.header?.cwd
+    if (!isNonEmptyString(headerCwd)) {
+      throw new Error('The Session has no working directory; file items cannot be added.')
+    }
+    const cwd = headerCwd
     signal?.throwIfAborted?.()
     const root = await fs.resolve(cwd, { cwd, signal })
     const target = await fs.resolve(rawPath, { cwd, signal })

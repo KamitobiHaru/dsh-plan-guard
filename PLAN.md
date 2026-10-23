@@ -43,7 +43,7 @@
 2. 工具全局注册；子代理用 `agent/created` + `agent.ctx.tools.restrict` 隐藏，执行时 `ctx.agents.roots()` 兜底。
 3. `ctx.userQuestions.askTimed` 是带自定义选项的阻塞问题通道，不依赖 approval policy；本会话 `never` 下可用。
 4. `ctx.storageDomain` 表 API 是 `put/update/delete/get`，**没有 `set`**；旧代码的 `.set` 已修正。domain 名必须匹配 `^[a-z][a-z0-9_]*$`：0.2.0 的 `plan-guard` 导致激活失败，0.2.1 改为 `plan_guard`，并加回归测试。
-5. `ctx.fs` 提供 `resolve/stat/streamText/contains/processPath`；`ctx.workingDirectory.ensure(agent)` 给会话 cwd；读取在 pre-step 是官方模式（agent-instructions 同款）。
+5. `ctx.fs` 提供 `resolve/stat/streamText/contains/processPath`；会话 cwd 取 live `Session.header.cwd`（`workingDirectory` 服务已在新 runtime 删除，0.6.1 起不再使用；`header` 恒存在，无 cwd 则报明确错误）；读取在 pre-step 是官方模式（agent-instructions 同款）。
 6. 注入：`agent/pre-step` 瀑布 `await next()` 后 splice 一条 user 消息，agent-loop 落事件（模型可见 ⟺ 已记录）。
 7. 与 `dsh-compaction-tune` 零交集：不改压缩配置/预设，只读会话事件与 storage。
 8. Web 模块表不含 `zod`；Client 的 strict codec 必须手写 `typeSymbol`/`create`，不能 `require('zod')`（0.2.2 修复，并加 vm 加载测试）。
@@ -88,6 +88,7 @@
 - [x] 0.5.1：verdict 折叠兼容 v4 嵌套形状（先读 `data.message`、回退扁平，`stateVersion 2 → 3`），43/43 测试
 - [x] 0.5.2：抽屉自滚动（`.pg-root` 照抄 files tab：`flex: auto` + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`），43/43 测试
 - [x] 0.6.0：抽屉预览 markdown 化（`MarkdownText` compact + 文件项"在阅览器中打开"按钮，可选 require + 纯文本降级，Host 零改动），44/44 测试
+- [x] 0.6.1：`add_file` 改读 live `Session.header.cwd`（`workingDirectory` 服务已删），45/45 测试
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 

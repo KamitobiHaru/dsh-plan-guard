@@ -45,6 +45,7 @@ function fakeContext() {
     id: SESSION_ID,
     surface: { nodes: [] },
     eventAt() { return undefined },
+    header: { cwd: '/repo' },
   }
   let projectionState = { docs: [], sawCompaction: true }
   let tool
@@ -194,6 +195,15 @@ test('tool add_file resolves, validates, previews, and records the file', async 
   assert.equal(file.path, '/repo/src/a.ts')
   assert.equal(file.displayPath, 'src/a.ts')
   assert.equal(file.workspaceRoot, '/repo')
+})
+
+test('tool add_file fails clearly when the session has no working directory', async () => {
+  const fake = await setup()
+  fake.rootAgent.session.header = {}
+  await assert.rejects(
+    fake.tool().execute({ action: 'add_file', path: 'src/a.ts' }, execFor(fake, 'call-nocwd')),
+    /no working directory/,
+  )
 })
 
 test('tool mount/unmount respects lock and never touches plan ids', async () => {
