@@ -3,9 +3,9 @@
  * tab, backed by the `plan-guard` Host Remote namespace and a self-refreshing
  * `plan-guard-drawer://` resource.
  *
- * Plain-JS UI plugin (window.__ModuleLoader__ module): React, zod, Cordis, and
- * the slots/locator machinery come from the browser module table; behavior
- * reaches the components through the inject face, never through ctx.
+ * Plain-JS UI plugin (window.__ModuleLoader__ module): React comes from the
+ * browser module table; behavior reaches the components through the inject
+ * face, never through ctx.
  * @module dsh-plan-guard/client
  */
 
@@ -13,7 +13,6 @@ window.__ModuleLoader__.load({
   id: 'dsh-plan-guard',
   factory(require) {
     const React = require('react')
-    const z = require('zod')
     const h = React.createElement
 
     const PLUGIN_ID = 'dsh-plan-guard'
@@ -303,23 +302,67 @@ window.__ModuleLoader__.load({
       })()
     }
 
+    // The browser module table seeds React but not zod. Strict codecs therefore
+    // carry small hand-written parsers: the Client only checks mode, typeSymbol,
+    // and create when mounting, while the Host validates arguments against its
+    // own descriptors. Keeping create() honest costs little and avoids a
+    // client-only dependency that cannot be resolved at runtime.
+    const strictCodec = (typeSymbol, jsonSchema, schema) => ({
+      mode: 'strict',
+      typeSymbol,
+      jsonSchema,
+      create: () => schema,
+    })
+    const stringCodec = (minLength) => strictCodec(
+      'dsh-plan-guard#String',
+      minLength > 0 ? { type: 'string', minLength } : { type: 'string' },
+      {
+        parse(value) {
+          if (typeof value !== 'string' || value.length < minLength) {
+            throw new Error(`expected a string with at least ${minLength} character(s)`)
+          }
+          return value
+        },
+      },
+    )
+    const booleanCodec = strictCodec(
+      'dsh-plan-guard#Boolean',
+      { type: 'boolean' },
+      {
+        parse(value) {
+          if (typeof value !== 'boolean') throw new Error('expected a boolean')
+          return value
+        },
+      },
+    )
+    const enumCodec = (values) => strictCodec(
+      'dsh-plan-guard#Policy',
+      { type: 'string', enum: values },
+      {
+        parse(value) {
+          if (!values.includes(value)) throw new Error(`expected one of ${values.join(', ')}`)
+          return value
+        },
+      },
+    )
+    const resultCodec = strictCodec(
+      'dsh-plan-guard#Result',
+      {},
+      { parse: (value) => value },
+    )
+
     const stringParameter = (name, minLength = 1) => ({
-      name, wire: name, source: 'json',
-      codec: { mode: 'strict', create: () => z.string().min(minLength), jsonSchema: { type: 'string', minLength } },
+      name, wire: name, source: 'json', codec: stringCodec(minLength),
     })
     const plainStringParameter = (name) => ({
-      name, wire: name, source: 'json',
-      codec: { mode: 'strict', create: () => z.string(), jsonSchema: { type: 'string' } },
+      name, wire: name, source: 'json', codec: stringCodec(0),
     })
     const booleanParameter = (name) => ({
-      name, wire: name, source: 'json',
-      codec: { mode: 'strict', create: () => z.boolean(), jsonSchema: { type: 'boolean' } },
+      name, wire: name, source: 'json', codec: booleanCodec,
     })
     const enumParameter = (name, values) => ({
-      name, wire: name, source: 'json',
-      codec: { mode: 'strict', create: () => z.enum(values), jsonSchema: { type: 'string', enum: values } },
+      name, wire: name, source: 'json', codec: enumCodec(values),
     })
-    const resultCodec = { mode: 'strict', create: () => z.unknown(), jsonSchema: {} }
     const remoteMethod = (method, parameters) => ({
       id: `${PLUGIN_ID}/plan-guard#${method}`,
       service: REMOTE_NS,

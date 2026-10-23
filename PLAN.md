@@ -34,13 +34,14 @@
 5. `ctx.fs` 提供 `resolve/stat/streamText/contains/processPath`；`ctx.workingDirectory.ensure(agent)` 给会话 cwd；读取在 pre-step 是官方模式（agent-instructions 同款）。
 6. 注入：`agent/pre-step` 瀑布 `await next()` 后 splice 一条 user 消息，agent-loop 落事件（模型可见 ⟺ 已记录）。
 7. 与 `dsh-compaction-tune` 零交集：不改压缩配置/预设，只读会话事件与 storage。
+8. Web 模块表不含 `zod`；Client 的 strict codec 必须手写 `typeSymbol`/`create`，不能 `require('zod')`（0.2.2 修复，并加 vm 加载测试）。
 
 ## 实施状态
 
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（21 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（22 个用例通过）
 - [x] `node --check index.js/client.js`
 - [ ] 安装与活会话验收（发布前未做：只完成静态检查与单元测试）
 
@@ -71,7 +72,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（21/21）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（22/22）。
 - 未跑：安装、`dsh web` 重启、真实注入、抽屉渲染、问题卡片、压缩矩阵。
 - 后续：`plugin_manager install_bundle` → 重启 → `cordis_inspect_query` Tool/Slots →
   抽屉矩阵 → 工具权限矩阵 → `dsh-compaction-tune` 强制压缩（`set-ratio.mjs 0.01 --retain 0.0005`，测试后恢复）→ 重启/恢复自愈。
