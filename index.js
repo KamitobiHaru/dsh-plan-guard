@@ -2,12 +2,13 @@
  * dsh-plan-guard Host half: guarded-context projection, storage, the
  * `context_guard` tool, Remote methods, and post-compaction re-injection.
  *
- * A plan document is one accepted `exit_plan_mode` submission keyed by its
- * tool call id, derived from logged session events. Notes and files are items
- * stored in the plugin's storage domain. After each successful compaction the
- * latest plan (unless the human dismissed it) and every mounted item re-enter
- * the model surface through one `agent/pre-step` message splice, which the
- * agent loop logs as a durable `user/message` event.
+ * A plan document is one `exit_plan_mode` submission keyed by its tool call
+ * id, derived from logged session events; each document also records whether
+ * its submission was accepted or dismissed (folded from its `tool/result`).
+ * Notes and files are items stored in the plugin's storage domain. The full
+ * guarded set enters the model surface through one `agent/pre-step` message
+ * splice, which the agent loop logs as a durable `user/message` event, only
+ * when no guarded message is visible; afterwards only changes arrive.
  *
  * The Web drawer and the model tool share one set of operations. The tool is
  * the only model-facing entry point; the drawer is human-only and ignores the
@@ -221,7 +222,8 @@ const stateSchema = {
     }
     for (const doc of value.docs) {
       if (!isRecord(doc) || !isNonEmptyString(doc.callId) || !isNonEmptyString(doc.title)
-        || typeof doc.markdown !== 'string') {
+        || typeof doc.markdown !== 'string'
+        || (doc.accepted !== undefined && typeof doc.accepted !== 'boolean')) {
         throw new Error('plan-guard projection document does not match its shape')
       }
     }
@@ -270,6 +272,21 @@ export function foldDocs(state, event) {
   // A successful compaction end (manual or automatic) switches guarding on.
   if (event.type === 'compaction/end' && event.data?.error === undefined) {
     return state.sawCompaction === true ? state : { ...state, sawCompaction: true }
+  }
+  // The verdict on one plan submission: a dismissed plan stays listed but can
+  // never auto-mount. `tool/result` always follows its `tool/call` in the log,
+  // so the document is already in `docs` when this arrives; a result naming an
+  // unknown call id (or none at all) is not this unit's.
+  if (event.type === 'tool/result') {
+    const callId = event.data?.toolCallId
+    if (typeof callId !== 'string') return state
+    const index = state.docs.findIndex(doc => doc.callId === callId)
+    if (index < 0) return state
+    const accepted = event.data?.isError === true ? false : true
+    if (state.docs[index].accepted === accepted) return state
+    const docs = state.docs.slice()
+    docs[index] = { ...docs[index], accepted }
+    return { ...state, docs }
   }
   const plan = event.type === 'tool/call'
     ? planFromNativeCall(event.data)
@@ -447,12 +464,14 @@ function readRecord(domain, config, sessionId) {
 /**
  * Effective mount state for one plan document.
  * An explicit human choice wins; otherwise the newest plan auto-mounts only
- * after the first successful compaction (when `autoMountLatestPlan` is on).
+ * after the first successful compaction (when `autoMountLatestPlan` is on)
+ * and only when it was not dismissed (`accepted === false` never auto-mounts;
+ * an unknown verdict keeps the previous behaviour).
  */
 export function effectivePlanState(doc, index, docs, record, config, sawCompaction) {
   const explicit = record.plans[doc.callId]
   const isLatest = index === docs.length - 1
-  const autoEligible = isLatest && config.autoMountLatestPlan === true
+  const autoEligible = isLatest && config.autoMountLatestPlan === true && doc.accepted !== false
   if (explicit === 'mounted' || explicit === 'unmounted') {
     return {
       mounted: explicit === 'mounted',
@@ -632,7 +651,7 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
   const omitted = []
   const included = []
   const header = `${config.header}\n`
-    + 'This block is background context, not a new request; it is sent again after each successful compaction and whenever the guarded set changes.\n\n'
+    + 'This block is background context, not a new request. You see the full set only the first time anything is guarded, or again after a compaction wiped it from the surface; afterwards you only get short updates when the guarded set changes (new content in full, removals as one-line notices).\n\n'
   const footer = config.toolEnabled === false
     ? '\n\nPlans and pinned items are managed by the user in the Guarded context drawer.\n'
     : '\n\nUse the `context_guard` tool to list, mount, unmount, or add notes/files. Plans are user-controlled.\n'
@@ -660,11 +679,12 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
   }
 }
 
-/** How a removal notice names one journal entry. */
+/** How a removal notice names one journal entry: title plus unique id. */
 function removalNoun(entry) {
-  if (entry.kind === 'plan') return `Plan "${entry.label}"`
-  if (entry.kind === 'note') return `Note "${entry.label}"`
-  return `File ${entry.label}`
+  const id = typeof entry?.id === 'string' && entry.id !== '' ? ` (${entry.id})` : ''
+  if (entry.kind === 'plan') return `Plan "${entry.label}"${id}`
+  if (entry.kind === 'note') return `Note "${entry.label}"${id}`
+  return `File ${entry.label}${id}`
 }
 
 /**
@@ -807,6 +827,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
         title: doc.title,
         size: doc.markdown.length,
         turn: doc.turn ?? null,
+        accepted: doc.accepted ?? null,
         mounted: effective.mounted,
         explicit: effective.explicit ?? null,
         auto: effective.auto,
@@ -1218,7 +1239,8 @@ function renderListText(state) {
   for (const plan of state.plans) {
     const flags = [plan.mounted ? 'mounted' : 'unmounted']
     if (plan.auto) flags.push('auto')
-    if (plan.awaitingCompaction) flags.push('will auto-mount after the first compaction')
+    if (plan.accepted === false) flags.push('rejected; never auto-mounts')
+    else if (plan.awaitingCompaction) flags.push('will auto-mount after the first compaction')
     if (plan.explicit !== null) flags.push(`explicit ${plan.explicit}`)
     lines.push(`- ${plan.callId} | ${plan.title} | ${flags.join(', ')}`)
   }
@@ -1242,7 +1264,7 @@ function toolPreviewText(item, prepared) {
 function createTool(ctx, operations, config) {
   return {
     name: TOOL_NAME,
-    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they are re-injected after every successful context compaction. Plans are user-controlled; this tool cannot mount or unmount them. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the whole set is re-sent after each successful compaction; an unmount adds one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them.',
+    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they stay in your context across steps and compactions. Plans are user-controlled; this tool cannot mount or unmount them. Rejected plans stay listed but never auto-mount. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the full set is re-sent only when the surface holds no guarded message (first guarding, or after a compaction); otherwise only changes arrive; an unmount adds one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them. When you hold facts, decisions, or work-in-progress that must survive for the rest of this session, persist them with `add_note`/`add_file` so they stay in your context.',
     parameters: {
       type: 'object',
       properties: {
@@ -1705,7 +1727,7 @@ export async function apply(ctx, config) {
       stateSchema,
       init: stateInit,
       apply: foldDocs,
-      stateVersion: 1,
+      stateVersion: 2,
     }),
     'plan-guard: plan-docs projection',
   )

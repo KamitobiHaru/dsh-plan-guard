@@ -270,6 +270,25 @@ test('service setPlan writes explicit choices and clears to auto', async () => {
   assert.equal(state.plans[0].explicit, null)
 })
 
+test('a dismissed plan stays listed but never auto-mounts', async () => {
+  const fake = await setup()
+  fake.setProjection({
+    docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one', turn: 1, accepted: false }],
+    sawCompaction: true,
+  })
+  const service = fake.provided.get(SERVICE_KEY)
+  const state = await service.list(SESSION_ID)
+  assert.equal(state.plans[0].mounted, false)
+  assert.equal(state.plans[0].auto, false)
+  assert.equal(state.plans[0].accepted, false)
+
+  const list = await fake.tool().execute({ action: 'list' }, execFor(fake, 'call-list'))
+  assert.match(list.text, /rejected; never auto-mounts/)
+
+  const mounted = await service.setPlan(SESSION_ID, 'p1', 'mounted')
+  assert.equal(mounted.plans[0].mounted, true, 'an explicit human mount still wins')
+})
+
 /** Mark a delivered injection as live on the fake Session surface. */
 function surfaceVisible(fake, message) {
   fake.session.surface.nodes.push('injected')
@@ -343,7 +362,8 @@ test('an incremental delivery carries the addition and one removal sentence', as
   await service.setMounted(SESSION_ID, firstNote.id, false)
   const removed = await preStep(fake, { turn: 3 })
   const line = removed.messages[1].content[0].text
-  assert.match(line, /Note "First" is no longer guarded\./)
+  const escapedId = firstNote.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  assert.match(line, new RegExp(`Note "First" \\(${escapedId}\\) is no longer guarded\\.`))
   assert.ok(!line.includes('## Note:'), 'a removal carries no content')
   assert.ok(!line.includes('First body.'))
 

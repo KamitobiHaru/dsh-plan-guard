@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
         'plans.explicitMounted': 'Mounted by you',
         'plans.explicitUnmounted': 'Unmounted by you',
         'plans.notAuto': 'Not auto-mounted',
+        'plans.rejected': 'Rejected',
         'plans.size': '{chars} chars',
         'plans.mountHint': 'Mount this plan',
         'plans.unmountHint': 'Unmount this plan',
@@ -121,6 +122,7 @@ window.__ModuleLoader__.load({
         'plans.explicitMounted': '由你挂载',
         'plans.explicitUnmounted': '由你卸下',
         'plans.notAuto': '不自动挂载',
+        'plans.rejected': '已拒绝',
         'plans.size': '{chars} 字符',
         'plans.mountHint': '挂载这份计划',
         'plans.unmountHint': '卸下这份计划',
@@ -601,6 +603,7 @@ window.__ModuleLoader__.load({
       else stateLabel = t('plans.notAuto')
       const meta = [
         stateLabel,
+        plan.accepted === false ? t('plans.rejected') : undefined,
         t('plans.size').replace('{chars}', String(plan.size)),
         typeof plan.turn === 'number' ? 'turn ' + String(plan.turn) : undefined,
       ].filter(part => typeof part === 'string' && part !== '').join(' · ')

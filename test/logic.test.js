@@ -222,6 +222,29 @@ test('injection composition enforces the total cap and lists omissions', () => {
   assert.ok(composed.included.length + composed.omitted.length === 6)
 })
 
+test('removal notices carry the title and the unique id', () => {
+  const cfg = baseConfig()
+  const docs = [{ ...planDoc('p1', 'Plan one', '# Plan one'), accepted: true }]
+  const update = t.composeUpdate({
+    pending: {
+      added: {},
+      removed: {
+        'plan:p1': { kind: 'plan', id: 'p1', label: 'Plan one' },
+        'note:noid': { kind: 'note', label: 'No id' },
+      },
+    },
+    record: record({ plans: { p1: 'unmounted' } }),
+    docs,
+    config: cfg,
+    sawCompaction: true,
+    contents: {},
+  })
+  assert.ok(update)
+  assert.match(update.text, /Plan "Plan one" \(p1\) is no longer guarded\./)
+  assert.match(update.text, /Note "No id" is no longer guarded\./)
+  assert.ok(!/undefined/.test(update.text), 'a missing id degrades to the title, never "undefined"')
+})
+
 test('plan projection folds accepted submissions and successful compactions', () => {
   const initial = t.stateInit()
   const withPlan = t.foldDocs(initial, {
@@ -236,11 +259,68 @@ test('plan projection folds accepted submissions and successful compactions', ()
   assert.equal(withPlan.docs.length, 1)
   assert.equal(withPlan.docs[0].title, 'Real plan')
   assert.equal(withPlan.docs[0].turn, 4)
+  assert.equal(withPlan.docs[0].accepted, undefined)
 
   const afterCompaction = t.foldDocs(withPlan, { type: 'compaction/end', data: {} })
   assert.equal(afterCompaction.sawCompaction, true)
   assert.equal(t.foldDocs(afterCompaction, { type: 'compaction/end', data: { error: 'x' } }).sawCompaction, true)
   assert.equal(t.foldDocs(initial, { type: 'compaction/end', data: { error: 'x' } }).sawCompaction, false)
+})
+
+test('plan projection folds the accept/dismiss verdict from tool results', () => {
+  const initial = t.stateInit()
+  const called = t.foldDocs(initial, {
+    type: 'tool/call',
+    data: {
+      callId: 'c1',
+      name: 'exit_plan_mode',
+      arguments: JSON.stringify({ plan: '# Real plan\nbody' }),
+      turn: 4,
+    },
+  })
+  const approved = t.foldDocs(called, { type: 'tool/result', data: { toolCallId: 'c1', isError: false } })
+  assert.equal(approved.docs[0].accepted, true)
+  assert.equal(
+    t.foldDocs(approved, { type: 'tool/result', data: { toolCallId: 'c1', isError: false } }),
+    approved,
+    'a repeated verdict keeps the state reference',
+  )
+  const dismissed = t.foldDocs(called, { type: 'tool/result', data: { toolCallId: 'c1', isError: true } })
+  assert.equal(dismissed.docs[0].accepted, false)
+  assert.equal(called.docs[0].accepted, undefined, 'folding never mutates the incoming state')
+
+  assert.equal(t.foldDocs(called, { type: 'tool/result', data: { toolCallId: 'unknown' } }), called)
+  assert.equal(t.foldDocs(called, { type: 'tool/result', data: {} }), called)
+  assert.equal(
+    t.foldDocs(called, { type: 'tool/call', data: { callId: 'x', name: 'bash', arguments: '{}' } }),
+    called,
+  )
+})
+
+test('a dismissed plan never auto-mounts but an explicit choice still wins', () => {
+  const cfg = baseConfig()
+  const docs = [{ ...planDoc('p1', 'P', '# P'), accepted: false }]
+  assert.deepEqual(
+    t.effectivePlanState(docs[0], 0, docs, record(), cfg, true),
+    { mounted: false, explicit: undefined, auto: false, autoEligible: false, awaitingCompaction: false },
+  )
+  assert.equal(
+    t.effectivePlanState(docs[0], 0, docs, record({ plans: { p1: 'mounted' } }), cfg, true).mounted,
+    true,
+  )
+  const approved = [{ ...planDoc('p1', 'P', '# P'), accepted: true }]
+  assert.equal(t.effectivePlanState(approved[0], 0, approved, record(), cfg, true).mounted, true)
+})
+
+test('projection schema accepts the verdict and rejects junk', () => {
+  const withVerdict = { docs: [{ callId: 'c', title: 'T', markdown: 'm', accepted: true }], sawCompaction: false }
+  assert.deepEqual(t.stateSchema.parse(withVerdict), withVerdict)
+  const legacy = { docs: [{ callId: 'c', title: 'T', markdown: 'm' }], sawCompaction: false }
+  assert.deepEqual(t.stateSchema.parse(legacy), legacy)
+  assert.throws(() => t.stateSchema.parse({
+    docs: [{ callId: 'c', title: 'T', markdown: 'm', accepted: 'yes' }],
+    sawCompaction: false,
+  }))
 })
 
 test('plan titles come from the first heading, else the first line', () => {
@@ -314,8 +394,8 @@ test('incremental update reports removals as one sentence and adds content', () 
   })
   assert.ok(update)
   assert.match(update.text, /— update/)
-  assert.match(update.text, /Note "Old note" is no longer guarded\./)
-  assert.match(update.text, /File src\/gone\.ts is no longer guarded\./)
+  assert.match(update.text, /Note "Old note" \(note:old\) is no longer guarded\./)
+  assert.match(update.text, /File src\/gone\.ts \(file:gone\) is no longer guarded\./)
   assert.ok(!/Note "Keep API" is no longer guarded/.test(update.text))
   for (const expected of ['## Note: Keep API', 'Do not rename.', '## File: src/a.ts', 'export const a = 1', '## Plan: Plan one']) {
     assert.match(update.text, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))

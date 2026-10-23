@@ -8,11 +8,11 @@
 |---|---|
 | 会话日志 | 每个 session 在 `<DSH_HOME>/sessions/<项目>/<sessionId>/<version>.jsonl` 的追加式事件记录 |
 | surface | 模型每一步真正看到的输入区间；压缩=把一段事件替换成摘要检查点，被替换事件仍在日志 |
-| Plan 文档 | 本会话日志里一次 `exit_plan_mode` 提交的 plan markdown，按 callId 取一条 |
+| Plan 文档 | 本会话日志里一次 `exit_plan_mode` 提交的 plan markdown，按 callId 取一条，并从同 callId 的 `tool/result` 折叠接受/拒绝结论 |
 | 守护上下文 | Plan + 备注 + 文件的集合；由插件按快照/增量注入 |
 | pending 日记 | 记录里 `{added, removed}` 两张表，记未送达的挂载/卸载/增删，按条目 key 合并 |
-| 快照 | surface 上没有守护消息时发的整份内容（首次、每次压缩后） |
-| 增量 | 已可见时发的小消息：新增发正文，卸载/删除发一句 no longer guarded |
+| 快照 | surface 上没有守护消息时发的整份内容（首次、压缩把旧消息换成摘要检查点之后） |
+| 增量 | 已可见时发的小消息：新增发正文，卸载/删除发一句带编号的 no longer guarded |
 | 条目 | 人类或模型添加的备注/文件，有 mounted/locked/createdBy |
 | 权限模式 | 会话级，只约束模型：ask / allow-mount / allow-unmount / allow-all / deny-all |
 | 锁定 | 条目级布尔值；锁定后模型不能挂载/卸载，人类仍可改 |
@@ -21,14 +21,17 @@
 ## 用户已确认的决策
 
 1. 只自动挂载**最新一份** Plan；旧 Plan 默认不挂载。
-2. 首次成功压缩后自动挂载；人类在此之前卸下则永久保持未挂载。
+2. 首次成功压缩后自动挂载，但**仅限结论不是拒绝的计划**（`accepted === false` 永不自动挂载；无结论的保持原行为）；人类在此之前卸下则永久保持未挂载。
 3. 模型不能挂载/卸载 Plan。
 4. 单项锁定 = 模型完全不能改；人类仍可改。
 5. 模型可添加文件 + 文字备注。
 6. 模型**不能删除任何条目**（自己的也不行，审计保留）；只能卸载；删除仅人类。
 7. 权限模式五种；人类动作永远允许。
-8. 注入不等压缩：新增立刻（下一步）可见，卸载只加一行提示，压缩后发快照；所有注入都是尾部追加，不改写历史（KV cache 前缀不失效）。
+8. 注入不等压缩：新增立刻（下一步）可见，卸载只加一行带编号的提示，快照只在 surface 无守护消息时发（首次、压缩清掉旧消息后）；所有注入都是尾部追加，不改写历史（KV cache 前缀不失效）。
 9. 界面上不写说明书：抽屉只留标签、状态、按钮；说明放在 README 与 guide 卡片的一行描述里。
+10. 被拒的计划只展示、不自动挂载：接受/拒绝结论以 `tool/result` 的 `toolCallId` + `isError` 为准（不硬匹配英文文案）；显式的人类挂载选择永远优先。
+11. 卸载通知带标题和唯一编号（与正文段的 `item: <id>` 对应）；id 缺失时降级为纯标题。
+12. 工具描述带一句引导模型主动持久化（facts/decisions/WIP → `add_note`/`add_file`），约 30 token，可删。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -51,32 +54,38 @@
 12. 抽屉视觉必须用 Theme 实况 token：`--dsw-alias-label-*`、`--dsw-alias-border-l1..l4`、
     `--dsw-alias-bg-layer-1/2`、`--dsw-alias-state-business-primary`、`--dsw-radius-*`、`--dsw-font-*`。
     早期用的 `--dsw-alias-text-primary` 等并不存在，全部回退成继承/透明（0.3.0 修复）。
+13. `exit_plan_mode` 的接受/拒绝写在 `tool/result` 里：同 `toolCallId`、`isError: true` + `Error: The user dismissed…`
+    即拒绝，`isError: false` + `Plan approved…` 即接受，随后跟 `plan/mode {"active": false}`。
+    本会话 seq 1007/1035/1037 与 seq 1543/1544 实证；被拒的 0.3.1 计划在 seq 1547 仍被注入——这正是 0.4.0 要修的 bug。
 
 ## 实施状态
 
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（31 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（36 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
 - [x] 真实回合验收（0.3.0，临时安装 + 无头 Chrome + 真模型）：
       首轮注入快照（未压缩也发）、抽屉加备注后下一轮注入 `— update` + 正文、卸载后下一轮只注入一行
-      `Note "E2E marker" is no longer guarded.`，三次注入都不重复
+      `Note "E2E marker" (note:…) is no longer guarded.`，三次注入都不重复
+- [x] 0.4.0：被拒计划不自动挂载（投影 fold `tool/result`、`stateVersion 2`、抽屉/`list` 标记），
+      快照头与工具描述去掉「每次压缩后重发」，卸载通知带编号，工具描述加主动持久化一句
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
 ## 端到端数据流
 
 1. 模型提交 plan（原生或 PTC）→ projection `plan-guard-docs` 记 `{callId,title,size,turn,markdown(≤64k)}`；
-   首次成功 `compaction/end` 把 `sawCompaction` 置真。
+   同 callId 的 `tool/result` 到达后记 `accepted`（`isError` 即拒）；
+    首次成功 `compaction/end` 把 `sawCompaction` 置真。
 2. 抽屉/工具 → storage domain `plan_guard` 表 `sessions`，按 sessionId 一条记录：
    `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}, pending:{added,removed}}`。
    每次改挂载状态都往 pending 记一条（按条目合并，add/remove 互相抵消）。
-3. pre-step：surface 上没有守护消息 → 取 projection + 记录 → 生效 Plan（最新自动，除非显式卸下）
+3. pre-step：surface 上没有守护消息 → 取 projection + 记录 → 生效 Plan（最新自动：须压缩过、须通过；显式选择优先）
    + 已挂载条目 → 实时读文件（上限/标记）→ 拼快照并清 pending；
-   否则若有 pending → 只拼增量（新增正文 / 卸载一行）→ 发完按 key 清 pending。
+   否则若有 pending → 只拼增量（新增正文 / 卸载一行带编号）→ 发完按 key 清 pending。
    两种消息都 splice 在 `lastClaimed + 1`，即请求尾部。
 4. 抽屉走 `dsh-resource://plan-guard-drawer/<sessionId>` 资源（3s 轮询）→ `plan-guard/list` 等 9 个 SRC 方法。
 5. 模型 `context_guard`：list/add_file/add_note/mount/unmount；权限矩阵 + 条目锁定 + ask 卡片；
@@ -97,7 +106,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（31/31）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（36/36）。
 - 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome（浅/深色截图、抽屉增删挂载、guide 图标、控制台零报错）。
 - 已跑：真实模型回合三条注入（快照 / 新增增量 / 卸载一行），直接读会话 jsonl 核对。
 - 未跑：压缩时刻、问题卡片、权限矩阵、重启/恢复自愈。
