@@ -59,6 +59,10 @@
 13. `exit_plan_mode` 的接受/拒绝写在 `tool/result` 里：同 `toolCallId`、`isError: true` + `Error: The user dismissed…`
     即拒绝，`isError: false` + `Plan approved…` 即接受，随后跟 `plan/mode {"active": false}`。
     本会话 seq 1007/1035/1037 与 seq 1543/1544 实证；被拒的 0.3.1 计划在 seq 1547 仍被注入——这正是 0.4.0 要修的 bug。
+    **补正（0.5.1）：v4 日志把结论包在 `data.message` 里嵌套**，扁平 `data.toolCallId`/`data.isError` 不存在，
+    0.4.0–0.5.0 的 verdict 分支在生产环境是死代码（只在手造扁平事件的单元测试里跑过）。
+    本会话 seq 2382（call）/2383（dismissal result，嵌套）/2386（仍注入全文）实证；复合 id `call_X|fc_X`
+    两侧逐字相同，严格相等即可。修法：先读 `data.message`、回退扁平，投影 `stateVersion 2 → 3` 重折旧缓存。
 14. plan 的 journal 只发生在人类显式翻转（`setPlan`）；自动翻转（新计划到来、`sawCompaction` 翻转）从不记 journal，
     而 injector `visible && keys empty → return`，所以快照可见时新批准计划永不注入、旧计划也无 notice——
     0.5.0 的 `syncAutoPlans` 补上这一环（新 auto 记 added、旧 auto 记 removed）。
@@ -68,7 +72,7 @@
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（41 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（43 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
@@ -79,6 +83,7 @@
       快照头与工具描述去掉「每次压缩后重发」，卸载通知带编号，工具描述加主动持久化一句
 - [x] 0.5.0：`syncAutoPlans` 自动顶替（记录 `autoPlan` 字段、新 auto 记 added、旧 auto 记 removed 一行），
       权限下拉自绘原生菜单化（`pg-menu*` 四类 + 内联 chevron/check、无新增 require）
+- [x] 0.5.1：verdict 折叠兼容 v4 嵌套形状（先读 `data.message`、回退扁平，`stateVersion 2 → 3`），43/43 测试
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
@@ -114,7 +119,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（41/41）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（43/43）。
 - 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome（浅/深色截图、抽屉增删挂载、guide 图标、控制台零报错）。
 - 已跑：真实模型回合三条注入（快照 / 新增增量 / 卸载一行），直接读会话 jsonl 核对。
 - 未跑：压缩时刻、问题卡片、权限矩阵、重启/恢复自愈。

@@ -297,6 +297,77 @@ test('plan projection folds the accept/dismiss verdict from tool results', () =>
   )
 })
 
+test('plan projection folds the verdict from the nested v4 result message', () => {
+  const callId = 'call_01a16a00722370958561d76b6897bb43|fc_01a16a00722370958561d76b6897bb43'
+  const initial = t.stateInit()
+  const called = t.foldDocs(initial, {
+    type: 'tool/call',
+    data: {
+      turn: 14,
+      step: 1,
+      callId,
+      name: 'exit_plan_mode',
+      arguments: JSON.stringify({ plan: '# Nested plan\nbody' }),
+    },
+  })
+  assert.equal(called.docs[0].callId, callId)
+  assert.equal(called.docs[0].accepted, undefined)
+
+  const dismissed = t.foldDocs(called, {
+    type: 'tool/result',
+    data: {
+      turn: 14,
+      step: 1,
+      message: {
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'Error: The user dismissed the plan review to speak instead; stay in plan mode, stop here, and wait for their message.' }],
+        isError: true,
+        id: '369bf392-b0dc-4191-aeae-a4ab86c4a955',
+      },
+    },
+  })
+  assert.equal(dismissed.docs[0].accepted, false)
+  assert.equal(called.docs[0].accepted, undefined, 'folding never mutates the incoming state')
+  assert.equal(
+    t.foldDocs(dismissed, {
+      type: 'tool/result',
+      data: { turn: 14, step: 1, message: { role: 'tool', toolCallId: callId, isError: true } },
+    }),
+    dismissed,
+    'a repeated nested verdict keeps the state reference',
+  )
+
+  const approved = t.foldDocs(called, {
+    type: 'tool/result',
+    data: {
+      turn: 8,
+      step: 4,
+      message: {
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'Plan approved — plan mode exited; carry out the plan starting with your next step.' }],
+        isError: false,
+        id: '35fb4f80-8e37-4a05-a7d0-de91ad67f59a',
+      },
+    },
+  })
+  assert.equal(approved.docs[0].accepted, true)
+
+  assert.equal(
+    t.foldDocs(called, { type: 'tool/result', data: { turn: 1, message: { role: 'tool', isError: true } } }),
+    called,
+    'a nested message without a call id is not this unit',
+  )
+  assert.equal(
+    t.foldDocs(called, { type: 'tool/result', data: { turn: 1, message: { role: 'tool', toolCallId: 'unknown', isError: true } } }),
+    called,
+  )
+  assert.equal(t.foldDocs(called, { type: 'tool/result', data: { turn: 1 } }), called)
+})
+
 test('a dismissed plan never auto-mounts but an explicit choice still wins', () => {
   const cfg = baseConfig()
   const docs = [{ ...planDoc('p1', 'P', '# P'), accepted: false }]

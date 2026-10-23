@@ -413,6 +413,32 @@ test('a rejected newcomer displaces nobody and adds nothing', async () => {
   assert.match(text, /Plan "Plan A" \(pA\) is no longer guarded\./, 'the dead auto plan is still noticed')
 })
 
+test('a plan dismissed after auto-mount is noticed once and never re-sent', async () => {
+  const fake = await setup()
+  const plan = { callId: 'pA', title: 'Plan A', markdown: '# Plan A\nbody A', turn: 1, accepted: true }
+  fake.setProjection({ docs: [plan], sawCompaction: true })
+  const first = await preStep(fake)
+  assert.equal(first.messages.length, 2)
+  assert.match(first.messages[1].content[0].text, /body A/)
+  surfaceVisible(fake, first.messages[1])
+  assert.equal(fake.records.get(SESSION_ID).autoPlan, 'pA')
+
+  // A refold (e.g. after the verdict-shape fix) settles the dismissal verdict.
+  fake.setProjection({
+    docs: [{ ...plan, accepted: false }],
+    sawCompaction: true,
+  })
+  const noticed = await preStep(fake, { turn: 2 })
+  assert.equal(noticed.messages.length, 2)
+  const text = noticed.messages[1].content[0].text
+  assert.match(text, /Plan "Plan A" \(pA\) is no longer guarded\./)
+  assert.ok(!text.includes('body A'), 'a dismissal notice carries no plan text')
+  assert.equal(fake.records.get(SESSION_ID).autoPlan, null)
+
+  const quiet = await preStep(fake, { turn: 3 })
+  assert.equal(quiet.messages.length, 1, 'a dismissal notice delivers once')
+})
+
 test('a compaction re-injects what is still guarded and drops the rest', async () => {
   const fake = await setup()
   fake.setProjection({ docs: [], sawCompaction: true })

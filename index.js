@@ -278,12 +278,20 @@ export function foldDocs(state, event) {
   // never auto-mount. `tool/result` always follows its `tool/call` in the log,
   // so the document is already in `docs` when this arrives; a result naming an
   // unknown call id (or none at all) is not this unit's.
+  // The v4 session log nests the outcome under `data.message`
+  // (`{turn, step, message: {toolCallId, content, isError, …}}`); older logs
+  // carry `toolCallId`/`isError` flat on `data`, which still works as fallback.
   if (event.type === 'tool/result') {
-    const callId = event.data?.toolCallId
-    if (typeof callId !== 'string') return state
+    const data = isRecord(event.data) ? event.data : undefined
+    const message = data !== undefined && isRecord(data.message) ? data.message : undefined
+    const callId = message !== undefined && typeof message.toolCallId === 'string'
+      ? message.toolCallId
+      : data !== undefined && typeof data.toolCallId === 'string' ? data.toolCallId : undefined
+    if (callId === undefined) return state
     const index = state.docs.findIndex(doc => doc.callId === callId)
     if (index < 0) return state
-    const accepted = event.data?.isError === true ? false : true
+    const isError = message !== undefined && message.isError !== undefined ? message.isError : data?.isError
+    const accepted = isError === true ? false : true
     if (state.docs[index].accepted === accepted) return state
     const docs = state.docs.slice()
     docs[index] = { ...docs[index], accepted }
@@ -1801,7 +1809,7 @@ export async function apply(ctx, config) {
       stateSchema,
       init: stateInit,
       apply: foldDocs,
-      stateVersion: 2,
+      stateVersion: 3,
     }),
     'plan-guard: plan-docs projection',
   )
