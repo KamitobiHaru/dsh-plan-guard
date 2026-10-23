@@ -1,0 +1,34 @@
+{
+  "name": "dsh-plan-guard",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Guard plans, notes, and files across context compaction, with a model tool and per-Session permissions.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KamitobiHaru/dsh-plan-guard.git"
+  },
+  "homepage": "https://github.com/KamitobiHaru/dsh-plan-guard#readme",
+  "bugs": {
+    "url": "https://github.com/KamitobiHaru/dsh-plan-guard/issues"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": []
+    }
+  }
+}

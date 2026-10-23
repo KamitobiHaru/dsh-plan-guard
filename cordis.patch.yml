@@ -1,0 +1,4 @@
+# dsh-plan-guard — one Host plugin row; the Client module registers through `dsh.client`.
+- insert:
+    - id: plugin-plan-guard
+      name: 'dsh-plan-guard'

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Guarded context",
+    "description": "Pin plans, notes, and files so they stay model-visible after context compaction."
+  }
+}
