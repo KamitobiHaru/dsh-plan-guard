@@ -36,6 +36,10 @@
 7. 与 `dsh-compaction-tune` 零交集：不改压缩配置/预设，只读会话事件与 storage。
 8. Web 模块表不含 `zod`；Client 的 strict codec 必须手写 `typeSymbol`/`create`，不能 `require('zod')`（0.2.2 修复，并加 vm 加载测试）。
 9. 资源地址必须是 `dsh-resource://<protocol>/…`，不能自定义 `<protocol>://`；`useResource` 只认前者（0.2.3 修复）。
+10. Client 自己 `$mount` 的 Remote 命名空间只能经 `ctx.inject(['remote.<ns>', …], cb)` 动态依赖组读取：
+    静态 `inject` 里写 `remote.<ns>` 会让 fiber 永久 pending（命名空间正是自己的 apply 创建的）；
+    不在任何 inject 组里直接读 `ctx.remote[ns]` 会抛 `cannot get property "remote.<ns>" without inject`，
+    该异常会让 Client 条目进入 failed，整页显示 “Failed to load plugins”（0.2.4 修复）。
 
 ## 实施状态
 
@@ -44,7 +48,9 @@
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
 - [x] 纯逻辑测试 + 假 ctx 集成测试（22 个用例通过）
 - [x] `node --check index.js/client.js`
-- [ ] 安装与活会话验收（发布前未做：只完成静态检查与单元测试）
+- [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
+      “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
+- [ ] 活会话验收（压缩后注入、权限矩阵、问题卡片、抽屉轮询刷新）
 
 ## 端到端数据流
 
@@ -54,7 +60,7 @@
    `{version:2, policy, plans:{callId:'mounted'|'unmounted'}, items:{file:/note:}}`。
 3. 首次成功压缩后的 pre-step：取 projection + 记录 → 生效 Plan（最新自动，除非显式卸下）
    + 已挂载条目 → 实时读文件（上限/标记）→ 拼一条 user 消息 splice 进 `decision.messages`。
-4. 抽屉走 `plan-guard-drawer://<sessionId>` 资源（3s 轮询）→ `plan-guard/list` 等 9 个 SRC 方法。
+4. 抽屉走 `dsh-resource://plan-guard-drawer/<sessionId>` 资源（3s 轮询）→ `plan-guard/list` 等 9 个 SRC 方法。
 5. 模型 `context_guard`：list/add_file/add_note/mount/unmount；权限矩阵 + 条目锁定 + ask 卡片；
    写入前重新读记录复核，避免 ask 期间状态变化。
 
@@ -74,6 +80,7 @@
 ## 验证
 
 - 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（22/22）。
-- 未跑：安装、`dsh web` 重启、真实注入、抽屉渲染、问题卡片、压缩矩阵。
+- 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome 抓取启动失败（0.2.4 前可复现 Client 条目 failed）。
+- 未跑：真实注入、问题卡片、压缩矩阵、重启/恢复自愈。
 - 后续：`plugin_manager install_bundle` → 重启 → `cordis_inspect_query` Tool/Slots →
   抽屉矩阵 → 工具权限矩阵 → `dsh-compaction-tune` 强制压缩（`set-ratio.mjs 0.01 --retain 0.0005`，测试后恢复）→ 重启/恢复自愈。

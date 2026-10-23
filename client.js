@@ -706,55 +706,81 @@ window.__ModuleLoader__.load({
     /** Plain text chip for the tab title seat; the framework owns the chip itself. */
     function DrawerTitle({ t }) { return h('span', {}, t('drawer.title')) }
 
+    /** The namespace service this plugin mounts for itself. */
+    const REMOTE_DEPENDENCY = `remote.${REMOTE_NS}`
+
+    /**
+     * Register dictionaries, the drawer resource and tab kind, and both slot
+     * seats. Runs inside an `ctx.inject` group because a namespace this plugin
+     * mounts itself cannot also sit in the static `inject` list: activation
+     * would wait on a service its own `apply` has not created yet, and reading
+     * `ctx.remote[namespace]` outside an inject group throws.
+     */
+    function registerUi(ctx) {
+      const t = ctx.locale.bind(LOCALE_NS)
+      const remote = ctx.remote[REMOTE_NS]
+
+      ctx.effect(() => ctx.locale.register(LOCALE_NS, DICTS), 'dsh-plan-guard: dictionaries')
+      ctx.effect(
+        () => ctx.resources.register({
+          protocol: TAB_KIND,
+          open(address, openCtx) { return openDrawerResource(remote, address, openCtx) },
+        }),
+        'dsh-plan-guard: drawer resource',
+      )
+      ctx.effect(
+        () => ctx.sidebarRightTabs.register({
+          id: PLUGIN_ID,
+          kind: TAB_KIND,
+          title: () => t('drawer.title'),
+          guide: [{
+            id: 'guarded-context',
+            order: 20,
+            title: () => t('guide.title'),
+            description: () => t('guide.description'),
+          }],
+        }),
+        'dsh-plan-guard: sidebar tab type',
+      )
+      ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+        name: 'sidebar.right.pane.tab', key: PLUGIN_ID, locale: LOCALE_NS,
+        inject: sessionId => ({
+          api: {
+            list: () => remote.list(sessionId),
+            setPolicy: policy => remote.setPolicy(sessionId, policy),
+            setPlan: (callId, choice) => remote.setPlan(sessionId, callId, choice),
+            addNote: (title, text) => remote.addNote(sessionId, title, text),
+            addFile: path => remote.addFile(sessionId, path),
+            setMounted: (itemId, mounted) => remote.setMounted(sessionId, itemId, mounted),
+            setLock: (itemId, locked) => remote.setLock(sessionId, itemId, locked),
+            removeItem: itemId => remote.removeItem(sessionId, itemId),
+            readContent: id => remote.content(sessionId, id),
+          },
+        }),
+      }, Drawer))
+      ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
+        name: 'sidebar.right.pane.tab.title', key: PLUGIN_ID, locale: LOCALE_NS,
+      }, DrawerTitle))
+    }
+
     return {
       inject: ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'],
       __testables: { drawerAddress, sessionIdOfAddress },
+      /** Mount the Remote namespace, then join the UI once that namespace is readable. */
       async apply(ctx) {
-        const t = ctx.locale.bind(LOCALE_NS)
-        ctx.effect(() => ctx.locale.register(LOCALE_NS, DICTS), 'dsh-plan-guard: dictionaries')
-        await ctx.remote.$mount(remoteContribution)
-        const remote = ctx.remote[REMOTE_NS]
-
-        ctx.effect(
-          () => ctx.resources.register({
-            protocol: TAB_KIND,
-            open(address, openCtx) { return openDrawerResource(remote, address, openCtx) },
-          }),
-          'dsh-plan-guard: drawer resource',
-        )
-        ctx.effect(
-          () => ctx.sidebarRightTabs.register({
-            id: PLUGIN_ID,
-            kind: TAB_KIND,
-            title: () => t('drawer.title'),
-            guide: [{
-              id: 'guarded-context',
-              order: 20,
-              title: () => t('guide.title'),
-              description: () => t('guide.description'),
-            }],
-          }),
-          'dsh-plan-guard: sidebar tab type',
-        )
-        ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
-          name: 'sidebar.right.pane.tab', key: PLUGIN_ID, locale: LOCALE_NS,
-          inject: sessionId => ({
-            api: {
-              list: () => remote.list(sessionId),
-              setPolicy: policy => remote.setPolicy(sessionId, policy),
-              setPlan: (callId, choice) => remote.setPlan(sessionId, callId, choice),
-              addNote: (title, text) => remote.addNote(sessionId, title, text),
-              addFile: path => remote.addFile(sessionId, path),
-              setMounted: (itemId, mounted) => remote.setMounted(sessionId, itemId, mounted),
-              setLock: (itemId, locked) => remote.setLock(sessionId, itemId, locked),
-              removeItem: itemId => remote.removeItem(sessionId, itemId),
-              readContent: id => remote.content(sessionId, id),
-            },
-          }),
-        }, Drawer))
-        ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
-          name: 'sidebar.right.pane.tab.title', key: PLUGIN_ID, locale: LOCALE_NS,
-        }, DrawerTitle))
+        const disposeRemote = await ctx.remote.$mount(remoteContribution)
+        const ui = ctx.inject([REMOTE_DEPENDENCY, 'slots', 'locale', 'resources', 'sidebarRightTabs'], registerUi)
+        try {
+          await ui
+        } catch (error) {
+          await ui.dispose()
+          await disposeRemote()
+          throw error
+        }
+        return async () => {
+          await ui.dispose()
+          await disposeRemote()
+        }
       },
     }
   },

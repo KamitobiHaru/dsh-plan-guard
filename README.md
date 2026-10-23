@@ -131,7 +131,7 @@ item: file:...
 
 ## 已知限制
 
-- **尚未做安装后的活会话验收**：v0.2.3 只跑了 `node --check`、22 个纯逻辑/假 ctx/client 模块测试，以及安装版工具 schema 校验。真实会话里的注入、抽屉渲染、问题卡片、权限门控、压缩后的幂等性都还没有在真实安装上跑过。
+- **尚未做活会话验收**：v0.2.4 已经做到「装进 profile → `dsh web` 启动 → 无头 Chrome 打开页面不报错误、`New tab` 里出现 Guarded context、抽屉正常渲染并调到 `remote/list`」，但真实会话里的压缩后注入、问题卡片、权限门控、抽屉轮询刷新与压缩幂等性还没跑过。
 - **抽屉只读活会话**：会话未恢复时显示提示，不能编辑；归档会话的读取（projection `wire.view`）未做。
 - **注入只在压缩后发生**：两次压缩之间的人类挂载/卸载不会改当前 surface，抽屉文案已说明。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
@@ -151,9 +151,13 @@ item: file:...
 ## 维护与发版
 
 - **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（22 个用例）。测试用假 Cordis ctx，覆盖权限矩阵、Plan 自动/显式状态、注入组合与截断、记录兼容、工具/Remote/注入路径。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.2.3` ↔ `v0.2.3`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.2.4` ↔ `v0.2.4`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在压缩后追加一条消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.2.4` 修复 Client 条目激活失败
+
+装进 profile 后 `dsh web` 进程能起来，但浏览器整页是 “Failed to load plugins / web boot: 1 entry did not activate / dsh-plan-guard: failed”。原因是 Client 自己 `$mount` 的 Remote 命名空间没有进任何 inject 组：`ctx.remote['plan-guard']` 会抛 `cannot get property "remote.plan-guard" without inject`，条目直接进 failed。把它写进静态 `inject` 也不行——命名空间正是这个插件的 `apply` 自己创建的，静态依赖会让 fiber 永远停在 pending。0.2.4 改成官方 `dsh-experimental-client-ui-voice-input` 的写法：先 `await ctx.remote.$mount(...)`，再用 `ctx.inject(['remote.plan-guard', …], registerUi)` 在动态依赖组里注册抽屉，并返回同时回收 UI 与 Remote 的 disposer；失败时先 `ui.dispose()` 再 `disposeRemote()` 后抛出。`client.test.js` 新增断言：依赖组含 `remote.plan-guard`、静态 `inject` 不含它、`apply` 返回可回收的 disposer。
 
 ### `0.2.3` 修复抽屉资源地址
 

@@ -45,7 +45,7 @@ function fakeContext(captured) {
     inject: (_name, callback) => callback(),
     register: definition => { captured.slots.push(definition); return () => {} },
   }
-  return {
+  const ctx = {
     locale: {
       bind: () => t,
       register: (namespace, dictionaries) => {
@@ -65,6 +65,15 @@ function fakeContext(captured) {
     slots,
     effect,
   }
+  // Mirrors Cordis `ctx.inject(deps, callback)`: the group runs only once every
+  // dependency is readable, and the returned fiber is awaitable and disposable.
+  ctx.inject = (dependencies, callback) => {
+    captured.injectGroups.push([...dependencies])
+    const fiber = Promise.resolve(callback(ctx))
+    fiber.dispose = async () => { captured.uiDisposed = true }
+    return fiber
+  }
+  return ctx
 }
 
 const WIRE_NAME = /^[A-Za-z0-9_$.-]+$/
@@ -92,8 +101,18 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   assert.equal(sessionIdOfAddress(drawerAddress('a b')), 'a b')
   assert.equal(sessionIdOfAddress('plan-guard-drawer://a'), undefined)
 
-  const captured = { slots: [], resources: [], tabs: [] }
-  await module.apply(fakeContext(captured))
+  const captured = { slots: [], resources: [], tabs: [], injectGroups: [] }
+  const disposeUi = await module.apply(fakeContext(captured))
+  assert.equal(typeof disposeUi, 'function', 'apply must return the disposer joining UI and Remote')
+
+  // The plugin mounts its own Remote namespace, so that namespace can only be
+  // readable inside a dynamic inject group. Joining it through the static
+  // `inject` list instead would park the fiber on a service its own apply has
+  // not created yet.
+  assert.deepEqual(captured.injectGroups, [
+    ['remote.plan-guard', 'slots', 'locale', 'resources', 'sidebarRightTabs'],
+  ])
+  assert.ok(!module.inject.includes('remote.plan-guard'), 'the self-mounted namespace stays out of the static inject list')
 
   const { contribution } = captured
   assert.equal(contribution.package, 'dsh-plan-guard')
@@ -129,4 +148,7 @@ test('client module imports only seeded modules and mounts valid descriptors', a
   }
 
   assert.equal(contribution.descriptors.length, 9)
+
+  await disposeUi()
+  assert.equal(captured.uiDisposed, true, 'the returned disposer drops the UI half')
 })
