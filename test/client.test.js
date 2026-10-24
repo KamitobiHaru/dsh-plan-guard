@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { test } from 'node:test'
 
 /** Load the browser module the way the Client module table would. */
-async function loadClientModule(seeded = {}) {
+async function loadClientModule(seeded = {}, reactOverride = undefined) {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   let entry
   const window = {
@@ -36,7 +36,7 @@ async function loadClientModule(seeded = {}) {
   assert.equal(entry?.id, 'dsh-plan-guard')
 
   const elements = []
-  const React = {
+  const React = reactOverride ?? {
     createElement: (type, props, ...children) => {
       const element = { type, props: props ?? {}, children }
       elements.push(element)
@@ -228,7 +228,7 @@ const viewerButtonOf = (tree) => flatElements(tree).filter(
   node => node.type === 'button' && Array.isArray(node.children) && node.children.includes('items.openViewer'),
 )
 
-test('preview renders shared markdown when available and plain text otherwise', async () => {
+test('preview is a content panel that renders shared markdown or plain text', async () => {
   const MarkdownText = () => null
   const seeded = await loadClientModule({
     '@deepseek-ai/dsh-client-ui-primitives': { MarkdownText },
@@ -247,18 +247,32 @@ test('preview renders shared markdown when available and plain text otherwise', 
     labels: { code: { copyLabel: 'Copy', copiedLabel: 'Copied' }, footnotes: 'Footnotes' },
   }
 
-  const rendered = ContentBlock({ content: ready, t, markdown })
-  const md = flatElements(rendered).filter(node => node.type === MarkdownText)
+  let collapses = 0
+  const rendered = ContentBlock({ content: ready, t, markdown, onCollapse: () => { collapses += 1 } })
+  const nodes = flatElements(rendered)
+  assert.equal(nodes[0].props.className, 'pg-preview', 'the preview owns a bordered panel')
+  assert.ok(nodes.some(node => node.type === 'span' && node.children.includes('preview.label')))
+  const md = nodes.filter(node => node.type === MarkdownText)
   assert.equal(md.length, 1, 'the shared renderer owns the preview body')
   assert.equal(md[0].props.text, '# Hi\nbody')
   assert.equal(md[0].props.streaming, false)
-  assert.equal(md[0].props.variant, 'compact')
+  assert.equal(md[0].props.variant, undefined, 'the default reading variant keeps primary text')
   assert.deepEqual(md[0].props.labels, markdown.labels)
-  assert.equal(flatElements(rendered).filter(node => node.type === 'pre').length, 0)
+  assert.equal(nodes.filter(node => node.type === 'pre').length, 0)
+  const toggle = nodes.find(node => node.type === 'button' && node.props.className === 'pg-previewToggle')
+  assert.ok(toggle, 'the panel header owns an explicit collapse control')
+  assert.ok(toggle.children.includes('preview.collapse'))
+  toggle.props.onClick()
+  assert.equal(collapses, 1)
+
+  const loading = flatElements(ContentBlock({ content: undefined, t, markdown }))
+  assert.equal(loading[0].props.className, 'pg-preview', 'loading keeps the panel shell')
 
   const fallback = ContentBlock({ content: ready, t, markdown: undefined })
-  assert.equal(flatElements(fallback).filter(node => node.type === 'pre').length, 1)
-  assert.equal(flatElements(fallback).filter(node => node.type === MarkdownText).length, 0)
+  const fallbackNodes = flatElements(fallback)
+  assert.equal(fallbackNodes[0].props.className, 'pg-preview')
+  assert.equal(fallbackNodes.filter(node => node.type === 'pre').length, 1)
+  assert.equal(fallbackNodes.filter(node => node.type === MarkdownText).length, 0)
 
   const fileItem = {
     kind: 'file', id: 'file:/a.md', title: 'a.md', path: '/repo/a.md',
@@ -270,4 +284,101 @@ test('preview renders shared markdown when available and plain text otherwise', 
   }
   assert.equal(viewerButtonOf(ItemRow({ ...rowProps, onOpenViewer: undefined })).length, 0)
   assert.equal(viewerButtonOf(ItemRow({ ...rowProps, onOpenViewer() {} })).length, 1)
+})
+
+test('the preview renders directly under its expanded row', async () => {
+  const seeded = await loadClientModule()
+  const { PlanRow, ItemRow } = seeded.module.__testables
+  const t = key => key
+  const preview = { type: 'PreviewMarker', props: {}, children: [] }
+  const plan = {
+    callId: 'call_1|fc_1', title: 'P', mounted: true, explicit: null, auto: true,
+    awaitingCompaction: false, accepted: true, autoEligible: true, size: 10, turn: 2,
+  }
+  const planRow = PlanRow({
+    plan, t, busy: false, expanded: true, preview, titleRef: undefined,
+    onToggle() {}, onAuto() {}, onExpand() {},
+  })
+  const planEntry = flatElements(planRow)[0]
+  assert.equal(planEntry.props.className, 'pg-entry pg-entryExpanded')
+  assert.equal(planEntry.children.length, 2)
+  assert.equal(planEntry.children[0].props.className, 'pg-card')
+  assert.equal(planEntry.children[1], preview)
+
+  const item = {
+    kind: 'note', id: 'note:1', title: 'N', path: null,
+    mounted: true, locked: false, createdBy: 'human', size: 3,
+  }
+  const itemRow = ItemRow({
+    item, t, busy: false, expanded: true, preview, titleRef: undefined, deleteConfirm: false,
+    onToggle() {}, onLock() {}, onDelete() {}, onConfirmDelete() {}, onCancelDelete() {}, onExpand() {},
+  })
+  const itemEntry = flatElements(itemRow)[0]
+  assert.equal(itemEntry.props.className, 'pg-entry pg-entryExpanded')
+  assert.equal(itemEntry.children.length, 2)
+  assert.equal(itemEntry.children[0].props.className, 'pg-card')
+  assert.equal(itemEntry.children[1], preview)
+
+  const title = flatElements(planRow).find(node => node.type === 'button' && node.props.className === 'pg-title')
+  assert.equal(title.props['aria-expanded'], true)
+
+  const collapsed = PlanRow({
+    plan, t, busy: false, expanded: false, preview: undefined,
+    onToggle() {}, onAuto() {}, onExpand() {},
+  })
+  const collapsedEntry = flatElements(collapsed)[0]
+  assert.equal(collapsedEntry.props.className, 'pg-entry')
+  // React.createElement keeps a null child in this fake; React itself drops it.
+  assert.equal(collapsedEntry.children.filter(child => child !== null).length, 1, 'collapsed rows carry no preview')
+})
+
+test('the drawer attaches the preview to the expanded row element', async () => {
+  const plan = {
+    callId: 'call_1|fc_1', title: 'P', mounted: true, explicit: null, auto: true,
+    awaitingCompaction: false, accepted: true, autoEligible: true, size: 10, turn: 2,
+  }
+  const item = {
+    kind: 'note', id: 'note:1', title: 'N', path: null,
+    mounted: true, locked: false, createdBy: 'human', size: 3,
+  }
+  const state = { live: true, policy: 'ask', plans: [plan], items: [item], limits: {} }
+  const content = { id: item.id, status: 'ready', value: { kind: 'note', title: 'N', text: 'body', truncated: false } }
+  // The Drawer's useState order: state, busy, error, expanded, content, addKind,
+  // noteTitle, noteText, filePath, deleteConfirm.
+  const initial = [
+    state, undefined, undefined, item.id, content,
+    undefined, '', '', '', undefined,
+  ]
+  let hook = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: () => [initial[hook++], () => {}],
+    useEffect: () => {},
+    useRef: value => ({ current: value }),
+    useMemo: factory => factory(),
+    useCallback: callback => callback,
+    Fragment: 'Fragment',
+  }
+  const seeded = await loadClientModule({}, React)
+  const { Drawer } = seeded.module.__testables
+  const tree = Drawer({
+    sessionId: 's1',
+    useResource: () => ({ status: 'live', value: state }),
+    t: key => key,
+    api: {},
+    useTabInfo: undefined,
+  })
+  const nodes = flatElements(tree)
+  const planRow = nodes.find(node => node.type?.name === 'PlanRow')
+  const itemRow = nodes.find(node => node.type?.name === 'ItemRow')
+  assert.ok(planRow !== undefined && itemRow !== undefined)
+  assert.equal(planRow.props.preview, undefined)
+  assert.ok(itemRow.props.preview, 'the expanded item owns the preview element')
+  assert.equal(itemRow.props.preview.type.name, 'ContentBlock')
+  assert.equal(itemRow.props.preview.props.content.id, item.id)
+  assert.equal(
+    nodes.filter(node => node.type?.name === 'ContentBlock').length,
+    0,
+    'no preview is appended after the section',
+  )
 })

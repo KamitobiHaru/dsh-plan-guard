@@ -120,6 +120,8 @@ window.__ModuleLoader__.load({
         'content.failed': 'Content failed to load.',
         'content.truncated': 'truncated',
         'content.unavailable': 'No content.',
+        'preview.label': 'Preview',
+        'preview.collapse': 'Collapse',
         'row.error': 'The change failed:',
       },
       zh: {
@@ -192,6 +194,8 @@ window.__ModuleLoader__.load({
         'content.failed': '内容加载失败。',
         'content.truncated': '已截断',
         'content.unavailable': '没有可显示的内容。',
+        'preview.label': '预览',
+        'preview.collapse': '收起',
         'row.error': '修改失败：',
       },
     }
@@ -352,9 +356,14 @@ window.__ModuleLoader__.load({
 .pg-textarea:focus-visible,
 .pg-title:focus-visible,
 .pg-btn:focus-visible,
-.pg-switch:focus-visible {
+.pg-switch:focus-visible,
+.pg-previewToggle:focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 2px;
+}
+.pg-previewToggle:focus-visible {
+  /* The preview panel clips its corners, so keep the ring inside the header. */
+  outline-offset: -2px;
 }
 .pg-section {
   display: flex;
@@ -388,7 +397,20 @@ window.__ModuleLoader__.load({
   flex: 1;
   min-width: 0;
 }
+.pg-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.pg-entryExpanded > .pg-card {
+  border-color: var(--dsw-alias-border-l2);
+}
 .pg-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
   margin: 0;
   padding: 0;
   border: 0;
@@ -399,6 +421,24 @@ window.__ModuleLoader__.load({
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
+}
+.pg-titleText {
+  flex: 1;
+  min-width: 0;
+}
+.pg-titleChevron {
+  display: inline-flex;
+  flex: none;
+  margin-top: 2px;
+  color: var(--dsw-alias-label-tertiary, inherit);
+}
+.pg-titleChevron svg {
+  width: 12px;
+  height: 12px;
+  transition: transform .12s;
+}
+.pg-titleChevronOpen svg {
+  transform: rotate(180deg);
 }
 .pg-meta {
   color: var(--dsw-alias-label-tertiary, inherit);
@@ -500,6 +540,94 @@ window.__ModuleLoader__.load({
   white-space: pre-wrap;
   word-break: break-word;
 }
+.pg-preview {
+  box-sizing: border-box;
+  min-width: 0;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-left: 2px solid var(--dsw-alias-state-business-primary);
+  border-radius: var(--dsw-radius-xl);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary, inherit);
+  overflow: hidden;
+}
+.pg-previewHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 2px 6px 2px 10px;
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.pg-previewLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: var(--dsw-font-xxs-12);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pg-previewMeta {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  font: var(--dsw-font-xxs-12);
+  white-space: nowrap;
+}
+.pg-previewToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pg-previewToggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.pg-previewToggle svg {
+  width: 12px;
+  height: 12px;
+}
+.pg-previewBody {
+  padding: 10px 12px;
+  max-height: 360px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  color: var(--dsw-alias-label-primary, inherit);
+}
+/* The reader typography is tuned for full-width documents; trim its vertical
+   rhythm for the narrow preview pane while keeping headings and links. */
+.pg-preview .pg-previewBody :where(p, ul, ol, blockquote) {
+  margin: 8px 0;
+}
+.pg-preview .pg-previewBody :where(h1, h2, h3, h4, h5, h6) {
+  margin: 14px 0 6px;
+}
+.pg-preview .pg-previewBody > :first-child {
+  margin-top: 0;
+}
+.pg-preview .pg-previewBody > :last-child {
+  margin-bottom: 0;
+}
+/* The fallback already sits inside the panel, so drop its double frame. */
+.pg-preview .pg-doc {
+  margin: 0;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
 .pg-form {
   box-sizing: border-box;
   display: flex;
@@ -551,7 +679,8 @@ window.__ModuleLoader__.load({
 }
 @media (prefers-reduced-motion: reduce) {
   .pg-switch,
-  .pg-knob {
+  .pg-knob,
+  .pg-titleChevron svg {
     transition: none;
   }
 }
@@ -721,6 +850,14 @@ window.__ModuleLoader__.load({
         }))
     }
 
+    function ChevronUpIcon() {
+      return h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none', 'aria-hidden': 'true' },
+        h('path', {
+          d: 'M3.5 8.75L7 5.25L10.5 8.75',
+          stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+        }))
+    }
+
     function CheckIcon() {
       return h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none', 'aria-hidden': 'true', className: 'pg-menuCheck' },
         h('path', {
@@ -821,7 +958,7 @@ window.__ModuleLoader__.load({
       }, h('span', { className: 'pg-knob' }))
     }
 
-    function PlanRow({ plan, busy, expanded, onToggle, onAuto, onExpand, t }) {
+    function PlanRow({ plan, busy, expanded, preview, titleRef, onToggle, onAuto, onExpand, t }) {
       let stateLabel
       if (plan.explicit === 'mounted') stateLabel = t('plans.explicitMounted')
       else if (plan.explicit === 'unmounted') stateLabel = t('plans.explicitUnmounted')
@@ -834,90 +971,119 @@ window.__ModuleLoader__.load({
         t('plans.size').replace('{chars}', String(plan.size)),
         typeof plan.turn === 'number' ? 'turn ' + String(plan.turn) : undefined,
       ].filter(part => typeof part === 'string' && part !== '').join(' · ')
-      return h('div', { className: 'pg-card' },
-        h(Switch, {
-          checked: plan.mounted, busy,
-          label: t(plan.mounted ? 'plans.unmountHint' : 'plans.mountHint'),
-          onChange: onToggle,
-        }),
-        h('div', { className: 'pg-body' },
-          h('button', {
-            type: 'button', className: 'pg-title', title: t(expanded ? 'plans.collapse' : 'plans.expand'),
-            onClick: onExpand,
-          }, plan.title),
-          h('div', { className: 'pg-meta' }, meta),
-          plan.explicit !== null && plan.autoEligible
-            ? h('div', { className: 'pg-actions' },
-              h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onAuto }, t('plans.followAuto')))
-            : null,
+      return h('div', { className: 'pg-entry' + (expanded === true ? ' pg-entryExpanded' : '') },
+        h('div', { className: 'pg-card' },
+          h(Switch, {
+            checked: plan.mounted, busy,
+            label: t(plan.mounted ? 'plans.unmountHint' : 'plans.mountHint'),
+            onChange: onToggle,
+          }),
+          h('div', { className: 'pg-body' },
+            h('button', {
+              type: 'button', className: 'pg-title', ref: titleRef,
+              'aria-expanded': expanded === true,
+              title: t(expanded ? 'plans.collapse' : 'plans.expand'),
+              onClick: onExpand,
+            },
+            h('span', { className: 'pg-titleText' }, plan.title),
+            h('span', {
+              className: 'pg-titleChevron' + (expanded === true ? ' pg-titleChevronOpen' : ''),
+              'aria-hidden': 'true',
+            }, h(ChevronDownIcon, null))),
+            h('div', { className: 'pg-meta' }, meta),
+            plan.explicit !== null && plan.autoEligible
+              ? h('div', { className: 'pg-actions' },
+                h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onAuto }, t('plans.followAuto')))
+              : null,
+          ),
         ),
+        preview === undefined ? null : preview,
       )
     }
 
-    function ItemRow({ item, busy, expanded, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, onOpenViewer, t }) {
+    function ItemRow({ item, busy, expanded, preview, titleRef, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, onOpenViewer, t }) {
       const stateLabel = item.mounted ? t('items.mounted') : t('items.unmounted')
       const meta = t('items.meta')
         .replace('{kind}', item.kind === 'file' ? t('items.kindFile') : t('items.kindNote'))
         .replace('{state}', item.locked ? stateLabel + ' · ' + t('items.locked') : stateLabel)
         .replace('{by}', item.createdBy === 'human' ? t('items.addedByHuman') : t('items.addedByModel'))
         .replace('{size}', String(item.size))
-      return h('div', { className: 'pg-card' },
-        h(Switch, {
-          checked: item.mounted, busy,
-          label: t(item.mounted ? 'items.unmountHint' : 'items.mountHint'),
-          onChange: onToggle,
-        }),
-        h('div', { className: 'pg-body' },
-          h('button', {
-            type: 'button', className: 'pg-title', title: t(expanded ? 'items.collapse' : 'items.expand'),
-            onClick: onExpand,
-          }, item.title),
-          item.kind === 'file' && item.path !== null ? h('div', { className: 'pg-path' }, item.path) : null,
-          h('div', { className: 'pg-meta' }, meta),
-          h('div', { className: 'pg-actions' },
+      return h('div', { className: 'pg-entry' + (expanded === true ? ' pg-entryExpanded' : '') },
+        h('div', { className: 'pg-card' },
+          h(Switch, {
+            checked: item.mounted, busy,
+            label: t(item.mounted ? 'items.unmountHint' : 'items.mountHint'),
+            onChange: onToggle,
+          }),
+          h('div', { className: 'pg-body' },
             h('button', {
-              type: 'button', className: 'pg-btn', disabled: busy,
-              'aria-pressed': item.locked,
-              onClick: () => onLock(!item.locked),
-            }, item.locked ? t('items.unlock') : t('items.lock')),
-            onOpenViewer === undefined ? null : h('button', {
-              type: 'button', className: 'pg-btn', disabled: busy,
-              onClick: onOpenViewer,
-            }, t('items.openViewer')),
-            deleteConfirm
-              ? h(React.Fragment, null,
-                h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onConfirmDelete }, t('items.deleteConfirm')),
-                h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onCancelDelete }, t('items.cancel')))
-              : h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onDelete }, t('items.delete')),
+              type: 'button', className: 'pg-title', ref: titleRef,
+              'aria-expanded': expanded === true,
+              title: t(expanded ? 'items.collapse' : 'items.expand'),
+              onClick: onExpand,
+            },
+            h('span', { className: 'pg-titleText' }, item.title),
+            h('span', {
+              className: 'pg-titleChevron' + (expanded === true ? ' pg-titleChevronOpen' : ''),
+              'aria-hidden': 'true',
+            }, h(ChevronDownIcon, null))),
+            item.kind === 'file' && item.path !== null ? h('div', { className: 'pg-path' }, item.path) : null,
+            h('div', { className: 'pg-meta' }, meta),
+            h('div', { className: 'pg-actions' },
+              h('button', {
+                type: 'button', className: 'pg-btn', disabled: busy,
+                'aria-pressed': item.locked,
+                onClick: () => onLock(!item.locked),
+              }, item.locked ? t('items.unlock') : t('items.lock')),
+              onOpenViewer === undefined ? null : h('button', {
+                type: 'button', className: 'pg-btn', disabled: busy,
+                onClick: onOpenViewer,
+              }, t('items.openViewer')),
+              deleteConfirm
+                ? h(React.Fragment, null,
+                  h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onConfirmDelete }, t('items.deleteConfirm')),
+                  h('button', { type: 'button', className: 'pg-btn', disabled: busy, onClick: onCancelDelete }, t('items.cancel')))
+                : h('button', { type: 'button', className: 'pg-btn pg-btn-danger', disabled: busy, onClick: onDelete }, t('items.delete')),
+            ),
           ),
         ),
+        preview === undefined ? null : preview,
       )
     }
 
-    function ContentBlock({ content, t, markdown }) {
+    function ContentBlock({ content, t, markdown, onCollapse }) {
+      let body
+      let meta
       if (content === undefined || content.status === 'loading') {
-        return h('p', { className: 'pg-empty' }, t('content.loading'))
+        body = h('p', { className: 'pg-empty' }, t('content.loading'))
+      } else if (content.status === 'failed') {
+        body = h('p', { className: 'pg-error' }, `${t('content.failed')} ${content.error ?? ''}`)
+      } else {
+        const value = content.value
+        if (!isRecord(value)) {
+          body = h('p', { className: 'pg-empty' }, t('content.unavailable'))
+        } else if (value.error !== null && value.error !== undefined) {
+          body = h('p', { className: 'pg-error' }, `${t('items.contentError')} ${value.error}`)
+        } else {
+          if (value.truncated === true) meta = t('content.truncated')
+          const text = String(value.text ?? '')
+          // The shared GFM renderer the built-in document viewer uses, at its
+          // default reading size (the compact variant is a dim hint style).
+          body = markdown !== undefined && text !== ''
+            ? h(markdown.Text, { text, streaming: false, labels: markdown.labels })
+            : h('pre', { className: 'pg-doc' }, text)
+        }
       }
-      if (content.status === 'failed') {
-        return h('p', { className: 'pg-error' }, `${t('content.failed')} ${content.error ?? ''}`)
-      }
-      const value = content.value
-      if (!isRecord(value)) return h('p', { className: 'pg-empty' }, t('content.unavailable'))
-      if (value.error !== null && value.error !== undefined) {
-        return h('p', { className: 'pg-error' }, `${t('items.contentError')} ${value.error}`)
-      }
-      const meta = [value.kind, value.title, value.truncated === true ? t('content.truncated') : undefined]
-        .filter(part => typeof part === 'string' && part !== '')
-        .join(' · ')
-      const text = String(value.text ?? '')
-      // The shared GFM renderer the built-in document viewer uses; without
-      // the primitives module this stays the plain-text fallback.
-      const rendered = markdown !== undefined && text !== ''
-        ? h(markdown.Text, { text, streaming: false, labels: markdown.labels, variant: 'compact' })
-        : h('pre', { className: 'pg-doc' }, text)
-      return h('div', { className: 'pg-body' },
-        meta === '' ? null : h('div', { className: 'pg-meta' }, meta),
-        rendered,
+      return h('div', { className: 'pg-preview' },
+        h('div', { className: 'pg-previewHead' },
+          h('span', { className: 'pg-previewLabel' }, t('preview.label')),
+          meta === undefined ? null : h('span', { className: 'pg-previewMeta' }, meta),
+          h('button', {
+            type: 'button', className: 'pg-previewToggle',
+            title: t('preview.collapse'), onClick: onCollapse,
+          }, t('preview.collapse'), h(ChevronUpIcon, null)),
+        ),
+        h('div', { className: 'pg-previewBody' }, body),
       )
     }
 
@@ -935,6 +1101,8 @@ window.__ModuleLoader__.load({
       const [noteText, setNoteText] = React.useState('')
       const [filePath, setFilePath] = React.useState('')
       const [deleteConfirm, setDeleteConfirm] = React.useState(undefined)
+      const titleRefs = React.useRef(new Map())
+      const contentRequest = React.useRef(0)
 
       // The shared markdown chrome, memoized per locale: MarkdownText keeps a
       // streaming render cache keyed off the labels identity.
@@ -991,18 +1159,50 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // Expanding swaps the single open preview; collapsing puts focus back on
+      // the row title so the panel's own button does not strand keyboard users.
+      const attachTitle = (id) => (node) => {
+        if (node === null || node === undefined) titleRefs.current.delete(id)
+        else titleRefs.current.set(id, node)
+      }
+
+      const collapse = (id) => {
+        // Invalidate an in-flight content read so a late response cannot
+        // repaint the panel or clobber the next row's content.
+        contentRequest.current += 1
+        setExpanded(undefined)
+        setContent(undefined)
+        const title = titleRefs.current.get(id)
+        if (title !== null && title !== undefined && typeof title.focus === 'function') title.focus()
+      }
+
+      const previewFor = (id) => {
+        if (expanded !== id) return undefined
+        return h(ContentBlock, {
+          // A late response for a previously expanded row must not paint under
+          // the row that is open now.
+          content: content !== undefined && content.id === id ? content : undefined,
+          t,
+          markdown,
+          onCollapse: () => { collapse(id) },
+        })
+      }
+
       const onExpand = async (id) => {
         if (expanded === id) {
-          setExpanded(undefined)
-          setContent(undefined)
+          collapse(id)
           return
         }
+        const request = contentRequest.current + 1
+        contentRequest.current = request
         setExpanded(id)
         setContent({ id, status: 'loading' })
         try {
           const value = await callRemote(() => api.readContent(id))
+          if (contentRequest.current !== request) return
           setContent({ id, status: 'ready', value })
         } catch (failure) {
+          if (contentRequest.current !== request) return
           setContent({ id, status: 'failed', error: failure instanceof Error ? failure.message : String(failure) })
         }
       }
@@ -1045,6 +1245,8 @@ window.__ModuleLoader__.load({
         t,
         busy: busy === `plan:${plan.callId}`,
         expanded: expanded === plan.callId,
+        titleRef: attachTitle(plan.callId),
+        preview: previewFor(plan.callId),
         onToggle: value => { void run(`plan:${plan.callId}`, () => api.setPlan(plan.callId, value ? 'mounted' : 'unmounted')) },
         onAuto: () => { void run(`plan:${plan.callId}`, () => api.setPlan(plan.callId, 'auto')) },
         onExpand: () => { void onExpand(plan.callId) },
@@ -1055,13 +1257,21 @@ window.__ModuleLoader__.load({
         t,
         busy: busy === `item:${item.id}`,
         expanded: expanded === item.id,
+        titleRef: attachTitle(item.id),
+        preview: previewFor(item.id),
         deleteConfirm: deleteConfirm === item.id,
         onToggle: value => { void run(`item:${item.id}`, () => api.setMounted(item.id, value)) },
         onLock: value => { void run(`item:${item.id}`, () => api.setLock(item.id, value)) },
         onDelete: () => setDeleteConfirm(item.id),
         onConfirmDelete: () => {
           void run(`item:${item.id}`, () => api.removeItem(item.id)).then(result => {
-            if (result.ok === true) setDeleteConfirm(undefined)
+            if (result.ok !== true) return
+            setDeleteConfirm(undefined)
+            if (expanded === item.id) {
+              contentRequest.current += 1
+              setExpanded(undefined)
+              setContent(undefined)
+            }
           })
         },
         onCancelDelete: () => setDeleteConfirm(undefined),
@@ -1141,9 +1351,6 @@ window.__ModuleLoader__.load({
             plans.length === 0 ? null : h('span', { className: 'pg-count' }, String(plans.length)),
           ),
           plans.length === 0 ? h('p', { className: 'pg-empty' }, t('plans.empty')) : planRows,
-          expanded !== undefined && plans.some(plan => plan.callId === expanded)
-            ? h(ContentBlock, { content, t, markdown })
-            : null,
         ),
         h('section', { className: 'pg-section' },
           h('div', { className: 'pg-sectionHead' },
@@ -1152,9 +1359,6 @@ window.__ModuleLoader__.load({
               t('items.limit').replace('{count}', String(items.length)).replace('{max}', String(itemMax))),
           ),
           items.length === 0 ? h('p', { className: 'pg-empty' }, t('items.empty')) : itemRows,
-          expanded !== undefined && items.some(item => item.id === expanded)
-            ? h(ContentBlock, { content, t, markdown })
-            : null,
           addForm,
         ),
       )
@@ -1224,7 +1428,7 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale', 'resources', 'remote', 'sidebarRight', 'sidebarRightTabs'],
-      __testables: { drawerAddress, sessionIdOfAddress, ContentBlock, ItemRow },
+      __testables: { drawerAddress, sessionIdOfAddress, Drawer, ContentBlock, PlanRow, ItemRow },
       /** Mount the Remote namespace, then join the UI once that namespace is readable. */
       async apply(ctx) {
         const disposeRemote = await ctx.remote.$mount(remoteContribution)

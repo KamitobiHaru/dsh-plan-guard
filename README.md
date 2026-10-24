@@ -10,7 +10,7 @@
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.6.1 状态**：Host/Client 实现与 45 个测试已完成。0.6.1 修 `add_file` 在新 runtime 彻底不可用（`workingDirectory` 服务已删除，改读 live `Session.header.cwd`），需重启 `dsh web` 生效。
+> **v0.6.2 状态**：Host/Client 实现与 47 个测试已完成。0.6.2 把抽屉预览移到展开条目正下方并做成内容面板（47 个用例）；0.6.1 的 `add_file` 修复（`workingDirectory` 服务已删除，改读 live `Session.header.cwd`）也包含在内，需重启 `dsh web` 生效。
 
 ## 工作原理
 
@@ -124,7 +124,7 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 前置：可用的 DSH（开发验证于 `0.2.1-rc.2` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.6.1
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.6.2
 
 **方式一：命令行** —— 上面的命令。
 
@@ -139,8 +139,8 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 右侧栏 guide 页 →「上下文守护」打开抽屉：
 
 - **顶部**：选择模型权限，改动立即生效，写入当前会话记录。
-- **Plans**：开关切换挂载；「自动」表示等首次压缩后自动挂载；「已拒绝」表示计划没通过，永不自动挂载（仍可手动挂载）；「恢复自动」清除人类的显式选择；点标题展开全文。
-- **已固定条目**：开关挂载/卸载；锁形按钮锁定/解锁（锁后模型完全不能改）；删除需两步确认；点标题展开预览。
+- **Plans**：开关切换挂载；「自动」表示等首次压缩后自动挂载；「已拒绝」表示计划没通过，永不自动挂载（仍可手动挂载）；「恢复自动」清除人类的显式选择；点标题或右侧箭头展开，预览紧贴该计划下方，右上角「收起」。
+- **已固定条目**：开关挂载/卸载；锁形按钮锁定/解锁（锁后模型完全不能改）；删除需两步确认；点标题或右侧箭头展开，预览紧贴该条目下方，右上角「收起」。
 - **添加**：「添加备注」（标题 + 正文）或「添加文件」（工作区路径，服务端校验存在、UTF-8、在 workspace 内）。
 - **Plan 的四种状态**：自动（最新、已压缩、已接受）/ 已挂载（人类显式）/ 已卸下（人类显式，之后不再自动挂载）/ 已拒绝（计划没通过，永不自动挂载）。旧 Plan 默认卸下，仍可手动挂载；上一个自动 Plan 会被新自动 Plan 顶掉（只发一行提示，不写显式选择，"恢复自动"语义不变）。
 
@@ -168,10 +168,16 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（45 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染与降级。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（47 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级。
 - **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.5.0` ↔ `v0.5.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在 pre-step 只追加注入消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.6.2` 预览紧跟条目 + 内容面板化
+
+纯 Client 改动，Host 不动。展开的预览从 section 末尾移到**展开条目正下方**：`PlanRow`/`ItemRow` 外层改成 `.pg-entry`，内部固定「卡片 → 预览」，浏览长列表时不再跳到列表底部。标题加展开箭头与 `aria-expanded`，预览头右侧常驻「收起」按钮，收起后焦点回到条目标题。
+
+预览不再像 hint：面板用 `.5px` `border-l2` + 2px 商务蓝左边线 + `bg-layer-2`，正文 `label-primary`；`MarkdownText` 去掉 `compact` 变体（它自带的 `color: label-tertiary` 正是深灰观感的来源），改用与阅览器一致的默认版式，再用 `.pg-previewBody` 收窄段落/标题间距；纯文本降级去掉重复边框。正文区 `max-height: 360px` 自滚动（原生滚动条 + stable gutter），抽屉根仍整体滚动。另修快速切换条目时旧请求结果短暂串台（请求序号 + `content.id` 双重校验）。
 
 ### `0.6.1` 修复 `add_file` 在新 runtime 不可用
 

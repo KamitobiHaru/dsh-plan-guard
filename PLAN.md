@@ -35,7 +35,8 @@
 13. 新自动计划顶掉上一个自动计划：只算自动的（人类显式选择不碰）、pinned 不算（只写 `plan:` 键）、新增与顶掉走内部 op 不问权限；不写显式 `unmounted`，保持 auto-following（"恢复自动"语义不变）。
 14. 原生 `<select>` 的弹窗 OS 渲染、CSS 够不着：权限下拉自绘（button + 弹窗），照抄官方 Menu token（`menu-surface-fill`/`elevation-prominent`/34px 行/hover=focus 填充/尾部对勾），不新增 require。
 15. 宿主 tab 体（`dsh-client-ui-sidebar-right`：`height: 100%` + `overflow: hidden`）不滚动，内容区必须自滚动：`.pg-root` 照抄 files tab 配方（`flex: auto` + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`），滚动条用原生的，不自绘。
-16. 抽屉预览 markdown 化：自带阅览器只认 `dsh-resource://file/**`，plan/备注是虚拟文本所以只做内联渲染——用阅览器同源的 `MarkdownText`（`dsh-client-ui-primitives`，`compact` 变体，不传本地链接/图片词表）；文件项另加"在阅览器中打开"按钮（tab slot 的 `useTabInfo` → `tab.actions.openResource(fileAddressFor(sessionId, undefined, item.path))`，`fileAddressFor` 来自 `dsh-util-workspace-path`）。新增 require 走工厂 `try/catch` 可选加载，缺包退回纯文本（0.2.2 教训）；Host 零改动。
+16. 抽屉预览 markdown 化：自带阅览器只认 `dsh-resource://file/**`，plan/备注是虚拟文本所以只做内联渲染——用阅览器同源的 `MarkdownText`（`dsh-client-ui-primitives`，`compact` 变体，不传本地链接/图片词表）；文件项另加"在阅览器中打开"按钮（tab slot 的 `useTabInfo` → `tab.actions.openResource(fileAddressFor(sessionId, undefined, item.path))`，`fileAddressFor` 来自 `dsh-util-workspace-path`）。新增 require 走工厂 `try/catch` 可选加载，缺包退回纯文本（0.2.2 教训）；Host 零改动。（0.6.2 起弃用 `compact`，见 17。）
+17. 预览是**条目的一部分**，不是 section 末尾的附属块：`PlanRow`/`ItemRow` 外层 `.pg-entry`，内部固定「卡片 → 预览」；标题带展开箭头与 `aria-expanded`，预览头常驻「收起」，收起后焦点回到标题；单展开手风琴，请求序号 + `content.id` 防旧请求串台（0.6.2）。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -68,6 +69,9 @@
 14. plan 的 journal 只发生在人类显式翻转（`setPlan`）；自动翻转（新计划到来、`sawCompaction` 翻转）从不记 journal，
     而 injector `visible && keys empty → return`，所以快照可见时新批准计划永不注入、旧计划也无 notice——
     0.5.0 的 `syncAutoPlans` 补上这一环（新 auto 记 added、旧 auto 记 removed）。
+15. `MarkdownText` 的 `compact` 变体不是「同一套样式的紧凑版」，而是 hint 样式：已发布 CSS 里
+    `._compact_*` 显式 `color: var(--dsw-alias-label-tertiary)`，预览文字因此发灰；默认变体 `._markdown_*`
+    才是 `label-primary`。0.6.2 起预览弃用 compact，用默认版式 + `.pg-previewBody` 作用域内收窄段落/标题间距。
 
 ## 实施状态
 
@@ -89,6 +93,7 @@
 - [x] 0.5.2：抽屉自滚动（`.pg-root` 照抄 files tab：`flex: auto` + `min-height: 0` + `overflow: auto` + `scrollbar-gutter: stable`），43/43 测试
 - [x] 0.6.0：抽屉预览 markdown 化（`MarkdownText` compact + 文件项"在阅览器中打开"按钮，可选 require + 纯文本降级，Host 零改动），44/44 测试
 - [x] 0.6.1：`add_file` 改读 live `Session.header.cwd`（`workingDirectory` 服务已删），45/45 测试
+- [x] 0.6.2：抽屉预览内联到展开条目正下方（`.pg-entry` 固定「卡片 → 预览」）、预览面板化（边框/左边线/`bg-layer-2`/`label-primary`，弃用 compact）、标题箭头 + 常驻收起 + 焦点回归、请求序号 + `content.id` 防串台，47/47 测试
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
