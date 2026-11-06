@@ -72,13 +72,20 @@
 15. `MarkdownText` 的 `compact` 变体不是「同一套样式的紧凑版」，而是 hint 样式：已发布 CSS 里
     `._compact_*` 显式 `color: var(--dsw-alias-label-tertiary)`，预览文字因此发灰；默认变体 `._markdown_*`
     才是 `label-primary`。0.6.2 起预览弃用 compact，用默认版式 + `.pg-previewBody` 作用域内收窄段落/标题间距。
+16. **Session Projection 注册在 0.2.2 改为异步**：`ctx.sessionProjections.register(def)` 返回
+    `ProjectionHandle`（带 `then` 的 thenable 函数），必须 `await` 并持有；读状态用
+    `handle.stateOf(session)`，旧的 `ctx.sessionProjections.stateOf(session, key)` 已弃用（首次读取打
+    deprecation warning）。注册仍是调用方 fiber 的 effect，卸载自动释放；句柄保留可继续折叠新事件
+    （0.7.0 迁移）。源码锚点：`dsh-session-projection/lib/index.js` 的
+    `SessionProjectionRegistry.register/acquire`。
+    兼容旧运行时（返回裸 disposer）时，`await` 得到函数、无 `stateOf`，`apply` 立即以明确的版本错误拒绝。
 
 ## 实施状态
 
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（43 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（48 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`

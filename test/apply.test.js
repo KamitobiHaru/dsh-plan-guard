@@ -34,7 +34,7 @@ function fakeFs() {
   }
 }
 
-function fakeContext() {
+function fakeContext(options = {}) {
   const records = new Map()
   const listeners = new Map()
   const disposers = []
@@ -77,13 +77,25 @@ function fakeContext() {
     storageDomain: {
       async open(spec) { assert.equal(spec.name, 'plan_guard'); return domain },
     },
-    sessionProjections: {
-      register(spec) { applied.push(spec); return () => {} },
-      stateOf(_session, key) {
-        assert.equal(key, PLAN_DOCS_PROJECTION_KEY)
-        return projectionState
+    sessionProjections: options.legacyProjections === true
+      // Pre-0.2.2 runtime: register() returns a bare disposer, never a handle.
+      ? { async register() { return () => {} } }
+      : {
+        /**
+         * DSH 0.2.2: registration is asynchronous and resolves to a
+         * `ProjectionHandle`. The fake mirrors that contract so `apply` exercises
+         * the awaited path; `setProjection` swaps what the handle folds.
+         */
+        async register(spec) {
+          assert.equal(spec.key, PLAN_DOCS_PROJECTION_KEY)
+          applied.push(spec)
+          return {
+            stateOf(_session) { return projectionState },
+            readerFor(_session) { return () => projectionState },
+            async dispose() {},
+          }
+        },
       },
-    },
     tools: {
       register(definition) { tool = definition; return () => {} },
     },
@@ -156,6 +168,16 @@ test('apply registers the tool, service, projection, and both listeners', async 
   assert.ok(fake.listeners.has('agent/created'))
   assert.ok(fake.listeners.has('agent/pre-step'))
   assert.ok(fake.applied.some(entry => entry && typeof entry === 'object' && entry.key === PLAN_DOCS_PROJECTION_KEY))
+})
+
+test('apply rejects a runtime whose registration is not a ProjectionHandle', async () => {
+  const fake = fakeContext({ legacyProjections: true })
+  await assert.rejects(
+    () => apply(fake.ctx, { defaultPolicy: 'allow-all' }),
+    /requires DSH 0\.2\.2-rc\.1 or newer/,
+  )
+  assert.equal(fake.tool(), undefined, 'no tool is published when the projection handle is missing')
+  assert.equal(fake.provided.has(SERVICE_KEY), false, 'no Remote service is published when the projection handle is missing')
 })
 
 test('delegated agents are restricted from the tool', async () => {

@@ -805,9 +805,10 @@ export function composeUpdate({ pending, record, docs, config, sawCompaction, co
 /**
  * Build the shared Host operations used by the Remote service, the tool, and
  * the injector. Writes are serialized per Session so the drawer and the tool
- * cannot lose each other's read-modify-write.
+ * cannot lose each other's read-modify-write. `planProjection` is the awaited
+ * `ProjectionHandle` for this plugin's unit; every read goes through it.
  */
-function createOperations(ctx, domain, projections, sessions, config) {
+function createOperations(ctx, domain, planProjection, sessions, config) {
   const queues = new Map()
   const serialize = (sessionId, task) => {
     const key = String(sessionId)
@@ -867,7 +868,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
         limits,
       }
     }
-    const projected = projections.stateOf(session, PLAN_DOCS_PROJECTION_KEY)
+    const projected = planProjection.stateOf(session)
     const docs = projected?.docs ?? []
     const sawCompaction = projected?.sawCompaction === true
     const record = read(sessionId)
@@ -923,7 +924,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
     if (typeof choice !== 'string' || !PLAN_CHOICES.includes(choice)) {
       throw new Error(`plan choice must be one of ${PLAN_CHOICES.join(', ')}`)
     }
-    const projected = projections.stateOf(session, PLAN_DOCS_PROJECTION_KEY)
+    const projected = planProjection.stateOf(session)
     const docs = projected?.docs ?? []
     const sawCompaction = projected?.sawCompaction === true
     const index = docs.findIndex(doc => doc.callId === callId)
@@ -1163,7 +1164,7 @@ function createOperations(ctx, domain, projections, sessions, config) {
     }
     const session = liveSession(sessionId)
     if (session !== undefined) {
-      const doc = projections.stateOf(session, PLAN_DOCS_PROJECTION_KEY)?.docs
+      const doc = planProjection.stateOf(session)?.docs
         ?.find(candidate => candidate.callId === id)
       if (doc !== undefined) {
         return { kind: 'plan', title: doc.title, text: doc.markdown, truncated: false, error: null }
@@ -1542,8 +1543,9 @@ function injectMessage(decision, messages, message) {
  *   and the content of what was added.
  * Failures self-heal on the next step; the step itself never fails because of
  * this plugin.
+ * @param planProjection - awaited handle for the `plan-guard-docs` unit.
  */
-function createInjector(ctx, projections, config, operations) {
+function createInjector(ctx, planProjection, config, operations) {
   const clear = async (sessionId, keys) => {
     if (keys.length === 0) return
     try {
@@ -1560,7 +1562,7 @@ function createInjector(ctx, projections, config, operations) {
     try {
       const sessionId = agent.session?.id
       if (sessionId === undefined) return decision
-      const projected = projections.stateOf(agent.session, PLAN_DOCS_PROJECTION_KEY)
+      const projected = planProjection.stateOf(agent.session)
       const docs = projected?.docs ?? []
       const sawCompaction = projected?.sawCompaction === true
       // Account for auto-mount transitions before anything else: a newly
@@ -1788,9 +1790,11 @@ Object.defineProperty(PlanGuardHostService.prototype, REMOTE_MARKER_KEY, {
 // #endregion
 
 /**
- * Host apply: fix the storage API, register the projection and domain, provide
- * the Remote service, install the tool and its delegated-agent restriction, and
- * install the post-compaction injection listener.
+ * Host apply: open the guard domain, await the plan-docs projection
+ * registration (DSH 0.2.2 made it asynchronous and expects the returned
+ * handle to be held), provide the Remote service, install the tool and its
+ * delegated-agent restriction, and install the post-compaction injection
+ * listener.
  * @param ctx - Cordis context owning this plugin's registrations.
  * @param config - raw row config (the Loader normalizes it through `Config`).
  */
@@ -1810,18 +1814,26 @@ export async function apply(ctx, config) {
     }
   }, 'plan-guard: guard storage domain')
 
-  ctx.effect(
-    () => projections.register({
-      key: PLAN_DOCS_PROJECTION_KEY,
-      stateSchema,
-      init: stateInit,
-      apply: foldDocs,
-      stateVersion: 3,
-    }),
-    'plan-guard: plan-docs projection',
-  )
+  // DSH 0.2.2: registration is asynchronous and resolves to a
+  // `ProjectionHandle`; the registration is still an effect on this fiber, so
+  // unloading releases the unit while the retained handle keeps folding new
+  // events on demand. Await it before publishing the service, tool, or
+  // listeners so no consumer can read a half-installed projection.
+  const planProjection = await projections.register({
+    key: PLAN_DOCS_PROJECTION_KEY,
+    stateSchema,
+    init: stateInit,
+    apply: foldDocs,
+    stateVersion: 3,
+  })
+  // The pre-0.2.2 runtime returned a bare disposer; awaiting it yields the
+  // disposer function itself, which has no `stateOf`. Fail loud instead of
+  // silently reading `undefined` for every Session.
+  if (typeof planProjection?.stateOf !== 'function') {
+    throw new Error('dsh-plan-guard 0.7.0 requires DSH 0.2.2-rc.1 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
+  }
 
-  const operations = createOperations(ctx, domain, projections, sessions, options)
+  const operations = createOperations(ctx, domain, planProjection, sessions, options)
   ctx.provide(SERVICE_KEY, new PlanGuardHostService({ ctx, operations }))
 
   if (options.toolEnabled === true) {
@@ -1836,7 +1848,7 @@ export async function apply(ctx, config) {
     })
   }
 
-  ctx.on('agent/pre-step', createInjector(ctx, projections, options, operations))
+  ctx.on('agent/pre-step', createInjector(ctx, planProjection, options, operations))
 }
 
 /** Pure helpers exported for `node --test`; not part of the plugin contract. */
