@@ -47,12 +47,13 @@ const planDoc = (callId, title, markdown) => ({ callId, title, markdown, turn: 1
 test('config defaults and validation', () => {
   const defaults = baseConfig()
   assert.equal(defaults.defaultPolicy, 'ask')
-  assert.equal(defaults.maxItems, 24)
+  assert.equal(defaults.maxItems, 0)
   assert.equal(defaults.allowOutsideWorkspace, false)
   assert.equal(defaults.maxCharsPerNote, 20000)
 
   assert.ok(t.validateConfig({ defaultPolicy: 'nope' }).issues)
-  assert.ok(t.validateConfig({ maxItems: 0 }).issues)
+  assert.equal(t.validateConfig({ maxItems: 0 }).value.maxItems, 0)
+  assert.ok(t.validateConfig({ maxItems: -1 }).issues)
   assert.ok(t.validateConfig({ maxItems: 1.5 }).issues)
   assert.ok(t.validateConfig({ disabled: 'yes' }).issues)
   assert.ok(t.validateConfig({ unknownField: 1 }).issues)
@@ -566,4 +567,47 @@ test('incremental update respects the total cap', () => {
   assert.ok(update)
   assert.match(update.text, /omitted over the total cap:/)
   assert.ok(update.added.length < 6)
+})
+
+test('the permission card shows a full note body with a scroll hint', () => {
+  const text = 'A'.repeat(1500)
+  const question = t.permissionQuestion('add', { kind: 'note', title: 'Long', text }, baseConfig())
+  assert.match(question.detail, /scroll inside the card/)
+  assert.match(question.detail, /Long content: scroll down/)
+  assert.match(question.detail, /共 1500 字符/)
+  assert.equal(question.detail.includes('[… truncated / 已截断]'), false)
+  assert.ok(question.detail.endsWith(text), 'the whole note body is the tail of the detail')
+})
+
+test('the permission card marks a truncated file preview and reports the real byte size', () => {
+  const preview = 'x'.repeat(4000)
+  const question = t.permissionQuestion('add', {
+    kind: 'file',
+    displayPath: 'big.txt',
+    title: 'big.txt',
+    preview,
+    previewTruncated: true,
+    size: 123456,
+  }, baseConfig())
+  assert.match(question.detail, /123456 bytes total/)
+  assert.match(question.detail, /文件共 123456 字节/)
+  assert.match(question.detail, /first 4000 characters shown/)
+  assert.match(question.detail, /\[… truncated \/ 已截断\]/)
+  assert.equal(question.detail.includes('scroll inside the card to read it'), false)
+  assert.equal(question.detail.includes('shown in full'), false)
+})
+
+test('a complete small file preview says so and carries no truncation marker', () => {
+  const question = t.permissionQuestion('add', {
+    kind: 'file',
+    displayPath: 'a.ts',
+    title: 'a.ts',
+    preview: 'export const a = 1',
+    previewTruncated: false,
+    size: 19,
+  }, baseConfig())
+  assert.match(question.detail, /19 bytes/)
+  assert.match(question.detail, /shown in full/)
+  assert.equal(question.detail.includes('[… truncated / 已截断]'), false)
+  assert.equal(question.detail.includes('first 19 characters'), false)
 })

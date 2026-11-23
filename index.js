@@ -61,8 +61,8 @@ const DEFAULT_CONFIG = {
   maxCharsPerNote: 20000,
   /** Total injected character cap across plans and items. */
   maxTotalChars: 100000,
-  /** Maximum number of stored notes/files (plans are derived, not counted). */
-  maxItems: 24,
+  /** Maximum number of stored notes/files; 0 disables the count limit (plans are derived, not counted). */
+  maxItems: 0,
   /** Permission mode for Sessions without a stored choice. */
   defaultPolicy: 'ask',
   /** Auto-mount the newest plan once the Session has compacted. */
@@ -80,7 +80,7 @@ const CONFIG_FIELD_LIMITS = {
   maxCharsPerFile: [1000, 200000],
   maxCharsPerNote: [1000, 200000],
   maxTotalChars: [5000, 1000000],
-  maxItems: [1, 100],
+  maxItems: [0, 10000],
   askTimeoutMs: [5000, 600000],
   previewChars: [500, 20000],
 }
@@ -1035,7 +1035,7 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
         next.items[existing.id] = { ...existing, mounted: true }
         return journal(next, 'added', existing.id, 'file', existing.id, itemLabel(existing))
       }
-      if (Object.keys(current.items).length >= config.maxItems) {
+      if (config.maxItems > 0 && Object.keys(current.items).length >= config.maxItems) {
         throw new Error(`This Session already has the maximum of ${config.maxItems} pinned items; remove one before adding another.`)
       }
       const auth = actor === 'model' ? authorizeModelAction(current, 'add', undefined, config) : { decision: 'allow' }
@@ -1073,7 +1073,7 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
       throw new Error(`The note exceeds the ${config.maxCharsPerNote}-character limit.`)
     }
     return mutate(sessionId, (current) => {
-      if (Object.keys(current.items).length >= config.maxItems) {
+      if (config.maxItems > 0 && Object.keys(current.items).length >= config.maxItems) {
         throw new Error(`This Session already has the maximum of ${config.maxItems} pinned items; remove one before adding another.`)
       }
       const auth = actor === 'model' ? authorizeModelAction(current, 'add', undefined, config) : { decision: 'allow' }
@@ -1248,23 +1248,49 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
 
 // #region tool text and permission question
 
-function permissionQuestion(action, target) {
+function permissionQuestion(action, target, config) {
   const verbEn = action === 'unmount' ? 'unmount' : action === 'add' ? 'add and mount' : 'mount'
   const verbZh = action === 'unmount' ? '卸载' : action === 'add' ? '添加并挂载' : '挂载'
   const kindEn = target.kind === 'file' ? 'file' : 'note'
   const kindZh = target.kind === 'file' ? '文件' : '备注'
   const name = target.kind === 'file' ? target.displayPath : target.title
   const detail = [
-    `Action / 动作: ${verbEn} / ${verbZh}`,
-    `Target / 对象: ${name}`,
-    'Session permission / 会话权限: ask',
-    'The change is applied only if you allow it. / 只有允许才会生效。',
+    `- Action / 动作: ${verbEn} / ${verbZh}`,
+    `- Target / 对象: ${name}`,
+    '- Session permission / 会话权限: ask',
+    '- The change is applied only if you allow it. / 只有允许才会生效。',
   ]
-  const excerpt = typeof target.text === 'string'
+  const content = typeof target.text === 'string'
     ? target.text
     : typeof target.preview === 'string' ? target.preview : undefined
-  if (excerpt !== undefined && excerpt !== '') {
-    detail.push(`Content / 内容:\n${excerpt.slice(0, 500)}${excerpt.length > 500 ? '\n[… truncated / 已截断]' : ''}`)
+  if (content !== undefined && content !== '') {
+    const options = config ?? DEFAULT_CONFIG
+    const isFile = target.kind === 'file'
+    const limit = isFile
+      ? Math.max(1, options.previewChars)
+      : Math.max(1, options.maxCharsPerNote)
+    const truncated = content.length > limit || target.previewTruncated === true
+    const shown = content.length > limit ? content.slice(0, limit) : content
+    const bytes = isFile && typeof target.size === 'number' ? target.size : undefined
+    if (content.length > 1000) {
+      detail.push('', truncated
+        ? '内容较长；以下为预览，向下滚动查看；允许 / 拒绝按钮在内容之后。 / Long content: preview below; scroll down to read it; Allow / Deny follow below.'
+        : '内容较长，向下滚动查看；允许 / 拒绝按钮在内容之后。 / Long content: scroll down to read it; Allow / Deny follow below.')
+    }
+    detail.push('', '---', '')
+    if (isFile) {
+      const byteWord = bytes === 1 ? 'byte' : 'bytes'
+      const total = bytes === undefined ? '文件较大 / large file' : `文件共 ${bytes} 字节 / ${bytes} ${byteWord} total`
+      detail.push(truncated
+        ? `Preview / 预览（${total}；以下为前 ${shown.length} 字符，允许后可在抽屉或预览器打开完整文件 / first ${shown.length} characters shown; open the full file in the drawer or viewer after you allow it）:`
+        : `Preview / 预览（${bytes === undefined ? '完整预览' : `共 ${bytes} 字节 / ${bytes} ${byteWord}`}，完整内容如下 / shown in full）:`)
+    } else {
+      detail.push(truncated
+        ? `Content / 内容（共 ${content.length} 字符；以下为前 ${shown.length} 字符 / ${content.length} chars total; first ${shown.length} shown）:`
+        : `Content / 内容（共 ${content.length} 字符，可在卡片内滚动查看 / ${content.length} chars; scroll inside the card to read it）:`)
+    }
+    detail.push('')
+    detail.push(truncated ? `${shown}\n[… truncated / 已截断]` : shown)
   }
   return {
     id: 'permission',
@@ -1287,7 +1313,7 @@ async function askPermission(ctx, exec, config, action, target) {
   let result
   try {
     result = await userQuestions.askTimed(
-      { agent: exec.agent, questions: [permissionQuestion(action, target)], signal: exec.signal },
+      { agent: exec.agent, questions: [permissionQuestion(action, target, config)], signal: exec.signal },
       exec.callId,
       config.askTimeoutMs,
     )
@@ -1395,8 +1421,9 @@ function createTool(ctx, operations, config) {
       if (agent === undefined || agent.id === undefined) {
         throw new Error('context_guard requires a live Session.')
       }
-      const isRoot = ctx.agents.roots().some(root => root.id === agent.id)
-      if (!isRoot) throw new Error('context_guard is only available in the main Session; delegated agents cannot change guarded context.')
+      if (agent.session?.header?.origin === 'subagent') {
+        throw new Error('context_guard is only available in the main Session; delegated agents cannot change guarded context.')
+      }
       const sessionId = agent.id
 
       if (call.action === 'list') {
@@ -1426,6 +1453,8 @@ function createTool(ctx, operations, config) {
             displayPath: prepared.displayPath,
             title: prepared.title,
             preview: prepared.preview,
+            previewTruncated: prepared.previewTruncated,
+            size: prepared.size,
           })
           if (!approved) throw new Error('The user denied the file mount request; nothing was added or changed.')
         }
@@ -1440,7 +1469,7 @@ function createTool(ctx, operations, config) {
       if (call.action === 'add_note') {
         const title = normalizeTitle(call.title) ?? titleFromText(call.text)
         const record = operations.read(sessionId)
-        if (Object.keys(record.items).length >= config.maxItems) {
+        if (config.maxItems > 0 && Object.keys(record.items).length >= config.maxItems) {
           throw new Error(`This Session already has the maximum of ${config.maxItems} pinned items; remove one before adding another.`)
         }
         const auth = authorizeModelAction(record, 'add', undefined, config)
@@ -1830,7 +1859,7 @@ export async function apply(ctx, config) {
   // disposer function itself, which has no `stateOf`. Fail loud instead of
   // silently reading `undefined` for every Session.
   if (typeof planProjection?.stateOf !== 'function') {
-    throw new Error('dsh-plan-guard 0.7.0 requires DSH 0.2.2-rc.1 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
+    throw new Error('dsh-plan-guard 0.8.0 requires DSH 0.2.2-rc.5 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
   }
 
   const operations = createOperations(ctx, domain, planProjection, sessions, options)
@@ -1839,8 +1868,7 @@ export async function apply(ctx, config) {
   if (options.toolEnabled === true) {
     ctx.effect(() => ctx.tools.register(createTool(ctx, operations, options)), 'plan-guard: context_guard tool')
     ctx.on('agent/created', ({ agent }) => {
-      const isRoot = ctx.agents.roots().some(root => root.id === agent.id)
-      if (isRoot) return
+      if (agent.session?.header?.origin !== 'subagent') return
       agent.ctx.effect(
         () => agent.ctx.tools.restrict({ deny: [TOOL_NAME] }),
         'plan-guard: hide context_guard from delegated agents',
@@ -1874,4 +1902,5 @@ export const __testables = {
   stateSchema,
   normalizeTitle,
   titleFromText,
+  permissionQuestion,
 }

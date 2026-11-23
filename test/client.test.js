@@ -382,3 +382,69 @@ test('the drawer attaches the preview to the expanded row element', async () => 
     'no preview is appended after the section',
   )
 })
+
+test('the drawer shows the item count without a maximum when the limit is unlimited', async () => {
+  const item = {
+    kind: 'note', id: 'note:1', title: 'N', path: null,
+    mounted: true, locked: false, createdBy: 'human', size: 3,
+  }
+  const render = async (limits, count = 1) => {
+    const items = Array.from({ length: count }, (_, index) => ({ ...item, id: `note:${index + 1}` }))
+    const state = { live: true, policy: 'ask', plans: [], items, limits }
+    const initial = [state, undefined, undefined, undefined, undefined, undefined, '', '', '', undefined]
+    let hook = 0
+    const React = {
+      createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+      useState: () => [initial[hook++], () => {}],
+      useEffect: () => {},
+      useRef: value => ({ current: value }),
+      useMemo: factory => factory(),
+      useCallback: callback => callback,
+      Fragment: 'Fragment',
+    }
+    const seeded = await loadClientModule({}, React)
+    const tree = seeded.module.__testables.Drawer({
+      sessionId: 's1',
+      useResource: () => ({ status: 'live', value: state }),
+      t: key => key,
+      api: {},
+      useTabInfo: undefined,
+    })
+    return flatElements(tree).find(node => node.props?.className === 'pg-count')
+  }
+
+  const single = await render({ maxItems: 0 })
+  assert.deepEqual(single.children, ['items.countOne'])
+  const multiple = await render({ maxItems: 0 }, 2)
+  assert.deepEqual(multiple.children, ['items.count'])
+  const bounded = await render({ maxItems: 2 }, 2)
+  assert.deepEqual(bounded.children, ['items.limit'])
+})
+
+test('item metadata uses bytes for files and chars for notes', async () => {
+  const seeded = await loadClientModule()
+  const t = key => ({
+    'items.meta': '{kind} · {state} · {by} · {size}',
+    'items.kindFile': 'File',
+    'items.kindNote': 'Note',
+    'items.mounted': 'Mounted',
+    'items.unmounted': 'Unmounted',
+    'items.locked': 'Locked',
+    'items.addedByHuman': 'human',
+    'items.addedByModel': 'model',
+    'items.bytes': '{size} bytes',
+    'items.chars': '{size} chars',
+  })[key] ?? key
+  const props = {
+    busy: false, expanded: false, preview: undefined, titleRef: () => {},
+    deleteConfirm: false, onToggle: () => {}, onLock: () => {}, onDelete: () => {},
+    onConfirmDelete: () => {}, onCancelDelete: () => {}, onExpand: () => {}, onOpenViewer: () => {}, t,
+  }
+  const metaOf = (item) => flatElements(seeded.module.__testables.ItemRow({ ...props, item }))
+    .find(node => node.props?.className === 'pg-meta')?.children
+
+  const file = { kind: 'file', id: 'file:1', title: 'big.bin', path: '/repo/big.bin', size: 1234, mounted: true, locked: false, createdBy: 'human' }
+  const note = { kind: 'note', id: 'note:1', title: 'N', path: null, size: 42, mounted: true, locked: false, createdBy: 'human' }
+  assert.deepEqual(metaOf(file), ['File · Mounted · human · 1234 bytes'])
+  assert.deepEqual(metaOf(note), ['Note · Mounted · human · 42 chars'])
+})

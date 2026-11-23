@@ -16,16 +16,25 @@ function fakeFs() {
         const missing = { targetKey: '/repo/src/missing.ts', displayPath: '/repo/src/missing.ts' }
         return missing
       }
+      if (path === 'big.txt' && opts.cwd === '/repo') {
+        return { targetKey: '/repo/big.txt', displayPath: '/repo/big.txt' }
+      }
       return { targetKey: path, displayPath: path }
     },
     async stat(target) {
       if (target.targetKey === '/repo') return { type: 'directory', version: 'v0' }
       if (target.targetKey === '/repo/src/a.ts') return { type: 'file', size: 19, version: 'v1' }
+      if (target.targetKey === '/repo/big.txt') return { type: 'file', size: 6000, version: 'v2' }
       return undefined
     },
     processPath(target) { return target.targetKey },
     contains(parent, child) { return child.targetKey === parent.targetKey || child.targetKey.startsWith(`${parent.targetKey}/`) },
     async streamText(target) {
+      if (target.targetKey === '/repo/big.txt') {
+        return (async function* chunks() {
+          yield 'q'.repeat(600)
+        })()
+      }
       assert.equal(target.targetKey, '/repo/src/a.ts')
       return (async function* chunks() {
         yield 'export const a = 1'
@@ -52,7 +61,12 @@ function fakeContext(options = {}) {
   const rootAgent = { id: SESSION_ID, session }
   const childAgent = {
     id: 'child',
-    session: { id: 'child', surface: { nodes: [] }, eventAt() { return undefined } },
+    session: {
+      id: 'child',
+      surface: { nodes: [] },
+      eventAt() { return undefined },
+      header: { cwd: '/repo', origin: 'subagent' },
+    },
     ctx: {
       effect(factory) { const disposer = factory(); applied.push(disposer); return disposer },
       tools: { restrict(filter) { restrictions.push(filter); return () => {} } },
@@ -100,7 +114,6 @@ function fakeContext(options = {}) {
       register(definition) { tool = definition; return () => {} },
     },
     agents: {
-      roots: () => [rootAgent],
       get: id => (String(id) === SESSION_ID ? rootAgent : undefined),
     },
     sessions: {
@@ -174,16 +187,27 @@ test('apply rejects a runtime whose registration is not a ProjectionHandle', asy
   const fake = fakeContext({ legacyProjections: true })
   await assert.rejects(
     () => apply(fake.ctx, { defaultPolicy: 'allow-all' }),
-    /requires DSH 0\.2\.2-rc\.1 or newer/,
+    /requires DSH 0\.2\.2-rc\.5 or newer/,
   )
   assert.equal(fake.tool(), undefined, 'no tool is published when the projection handle is missing')
   assert.equal(fake.provided.has(SERVICE_KEY), false, 'no Remote service is published when the projection handle is missing')
 })
 
-test('delegated agents are restricted from the tool', async () => {
+test('delegated agents are restricted from the tool and root agents are not', async () => {
   const fake = await setup()
+  fake.listeners.get('agent/created')({ agent: fake.rootAgent })
+  assert.deepEqual(fake.restrictions, [])
   fake.listeners.get('agent/created')({ agent: fake.childAgent })
   assert.deepEqual(fake.restrictions, [{ deny: [TOOL_NAME] }])
+})
+
+test('the tool refuses delegated agents', async () => {
+  const fake = await setup()
+  const childExec = { ...execFor(fake), agent: fake.childAgent }
+  await assert.rejects(
+    fake.tool().execute({ action: 'list' }, childExec),
+    /only available in the main Session/,
+  )
 })
 
 test('tool list and add_note produce storage state and a readable list', async () => {
@@ -253,6 +277,36 @@ test('ask policy consults userQuestions and applies on allow', async () => {
   assert.equal(fake.ctx.userQuestions.calls[0].callId, 'call-ask')
   assert.match(added.text, /Added and mounted note/)
   assert.ok(Object.values(fake.records.get(SESSION_ID).items).some(item => item.kind === 'note'))
+})
+
+test('the permission card carries the complete note body instead of a 500-character excerpt', async () => {
+  const fake = await setup({ defaultPolicy: 'ask' })
+  const head = 'HEAD-' + 'a'.repeat(600)
+  const tail = 'TAIL-' + 'z'.repeat(600)
+  const text = `${head}\n${tail}`
+  await fake.tool().execute({ action: 'add_note', text }, execFor(fake, 'call-long'))
+  const detail = fake.ctx.userQuestions.calls[0].request.questions[0].detail
+  assert.match(detail, /scroll inside the card/)
+  assert.match(detail, new RegExp(text.slice(-12).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(detail.includes('[… truncated / 已截断]'), false)
+  assert.ok(detail.length > 1200, 'the full body is present in the question detail')
+})
+
+test('items are unlimited by default and an explicit maxItems still bounds them', async () => {
+  const fake = await setup()
+  for (let index = 0; index < 25; index += 1) {
+    await fake.tool().execute({ action: 'add_note', text: `note ${index}` }, execFor(fake, `call-many-${index}`))
+  }
+  assert.equal(Object.keys(fake.records.get(SESSION_ID).items).length, 25)
+  assert.equal((await fake.provided.get(SERVICE_KEY).list(SESSION_ID)).limits.maxItems, 0)
+
+  const bounded = await setup({ maxItems: 2 })
+  await bounded.tool().execute({ action: 'add_note', text: 'one' }, execFor(bounded, 'call-a'))
+  await bounded.tool().execute({ action: 'add_note', text: 'two' }, execFor(bounded, 'call-b'))
+  await assert.rejects(
+    bounded.tool().execute({ action: 'add_note', text: 'three' }, execFor(bounded, 'call-c')),
+    /maximum of 2 pinned items/,
+  )
 })
 
 test('service mutation methods return refreshed state and content reads files', async () => {
@@ -515,4 +569,15 @@ test('the tool reports availability from the next step', async () => {
   const fake = await setup()
   const added = await fake.tool().execute({ action: 'add_note', text: 'Keep it.' }, execFor(fake, 'call-copy'))
   assert.match(added.text, /from the next step/)
+})
+
+test('the file permission card reports the real size and marks a capped preview', async () => {
+  const fake = await setup({ defaultPolicy: 'ask', previewChars: 500 })
+  await fake.tool().execute({ action: 'add_file', path: 'big.txt' }, execFor(fake, 'call-big'))
+  const detail = fake.ctx.userQuestions.calls[0].request.questions[0].detail
+  assert.match(detail, /文件共 6000 字节/)
+  assert.match(detail, /6000 bytes total/)
+  assert.match(detail, /first 500 characters shown/)
+  assert.match(detail, /\[… truncated \/ 已截断\]/)
+  assert.equal(detail.includes('scroll inside the card to read it'), false)
 })

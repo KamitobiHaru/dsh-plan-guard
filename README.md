@@ -10,7 +10,7 @@
 - **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.7.0 状态**：Host/Client 实现与 48 个测试已完成。0.7.0 迁移到 DSH 0.2.2 的**异步 Session Projection 注册**（`await register()` 并持有 `ProjectionHandle`，读状态改用 `handle.stateOf`），Host 行可在 0.2.2-rc.1 激活；0.6.2 的抽屉预览与 0.6.1 的 `add_file` 修复也包含在内，需重启 `dsh web` 生效。
+> **v0.8.0 状态**：Host/Client 实现与 57 个测试已完成。0.8.0 适配 DSH 0.2.2-rc.5（`ctx.agents.roots()` 已移除，root/subagent 改用 `Session.header.origin`）、默认取消条目数量上限、权限问题卡片展示完整备注并准确标记文件预览截断；0.7.0 的异步投影、0.6.2 的抽屉预览与 0.6.1 的 `add_file` 修复都在。需重启 `dsh web` 生效。
 
 ## 工作原理
 
@@ -55,7 +55,7 @@ DSH 的会话日志是追加式的：压缩不删除事件，只是把一段事�
 - 没有 `remove`；删除只能由人类在抽屉里做。
 - 添加即挂载，**下一个 step** 就能看到内容；卸载会在尾部追加一行 `… (<id>) is no longer guarded.`。要立刻读文件内容，用 `add_file` 返回的预览。
 - 参数由工具自己校验（工具框架不校验原始 JSON Schema 参数），错误以工具错误返回。
-- 工具全局注册，所有 root 会话都能看到（包括 `minimal` 预设）；`agent/created` 时对子代理 `tools.restrict`，执行时再用 `agents.roots()` 兜底，所以子代理看不到也调不到。
+- 工具全局注册，所有 root 会话都能看到（包括 `minimal` 预设）；`agent/created` 时对子代理 `tools.restrict`，执行时再用 `session.header.origin` 兜底，所以子代理看不到也调不到。
 - 不写自定义工具卡片，Web 用默认的通用卡片。
 
 ## 注入内容
@@ -111,7 +111,7 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 | `maxCharsPerFile` | `20000` | 单文件注入上限 |
 | `maxCharsPerNote` | `20000` | 单备注上限 |
 | `maxTotalChars` | `100000` | 全部注入内容总上限 |
-| `maxItems` | `24` | 备注 + 文件条目上限（Plan 不计） |
+| `maxItems` | `0` | 备注 + 文件条目上限；`0` = 不限（Plan 不计） |
 | `defaultPolicy` | `ask` | 没有存储记录时使用的权限模式 |
 | `autoMountLatestPlan` | `true` | 首次压缩后自动挂载最新 Plan（被拒的不挂） |
 | `askTimeoutMs` | `120000` | 权限问题等待上限 |
@@ -122,9 +122,9 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 ## 安装
 
-前置：可用的 DSH（开发验证于 `0.2.2-rc.1` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
+前置：可用的 DSH（开发验证于 `0.2.2-rc.5` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.7.0
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.8.0
 
 **方式一：命令行** —— 上面的命令。
 
@@ -146,12 +146,15 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 挂载/卸载在**下一步**就进入模型上下文；模型动作需要权限时，对话里出现问题卡片，允许后工具在同一次调用里完成，拒绝/超时则不写入。
 
+问题卡片里备注正文完整展示（上限 `maxCharsPerNote`）；内容超过 1000 字符时，顶部会提示向下滚动、允许 / 拒绝按钮在内容之后。文件只预览前 `previewChars` 个字符，卡片会写明文件字节数与截断标记，并说明这是预览而非全文；允许后在抽屉或预览器里打开完整文件。
+
 ## 已知限制
 
 - **尚未做压缩矩阵验收**：v0.4.0 已在临时安装里跑过真实模型回合（快照、新增增量、卸载一行三条注入都对），但「压缩发生的那一刻」、问题卡片、权限矩阵与抽屉轮询刷新还没在真实会话里逐一跑过。
 - **抽屉只读活会话**：会话未恢复时显示提示，不能编辑；归档会话的读取（projection `wire.view`）未做。
 - **卸载提示只是一句话**：`… (<id>) is no longer guarded.` 不会删掉历史里的旧正文；旧正文要等下次压缩才真正离开 surface。
 - **pending 有上限**：最多记 200 条未送达变更，超出丢最旧的；长时间停用注入（`disabled`）时可能少报几条。
+- **默认不限条目数量**：`maxItems: 0` 时 storage 会随备注/文件增长；进入模型上下文的内容仍受单条与 `maxTotalChars` 上限约束。需要硬上限时在 config 里把 `maxItems` 设为正整数。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
 - **备注不能原地编辑**：改内容要删除后重新添加。删除是 storage 操作，不额外写会话事件。
 - **模型不能删除任何条目**：工具没有删除动作；只能卸载。调用与结果留在会话日志里，便于审计。
@@ -168,10 +171,27 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（48 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.7.0` ↔ `v0.7.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（57 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.8.0` ↔ `v0.8.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`（0.2.2 起为异步注册，启动时 `await` 并持有句柄）、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在 pre-step 只追加注入消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.8.0` 追的是 DSH `0.2.2-rc.5`（root 判定、条目上限、完整备注卡片）
+
+- **移除 `ctx.agents.roots()`**：0.2.2-rc.5 的 `Agent` 只剩 `id`；root/subagent 改用
+  `agent.session.header.origin === 'subagent'` 判断。`agent/created` 只对子代理
+  `tools.restrict`，工具执行时再兜底拒绝；行为与 0.7.0 相同，只是不再依赖已删除的 API。
+- **条目数量上限默认取消**：`maxItems` 默认从 24 改为 0（不限），抽屉中文显示「N 条（不限）」、英文显示 `N items (no limit)` 并按单复数切换；
+  仍可在 config 里设 `maxItems > 0` 保留上限。storage 记录格式不变，已有数据无需迁移。
+- **权限问题卡片展示完整备注**：去掉 `permissionQuestion()` 的 500 字符截断，按
+  `maxCharsPerNote` 完整展示备注并提示可在卡片内滚动；内置问题卡片本身即可滚动，之前
+  「看不全」是内容被截断，而不是滚动容器缺失。内容超过 1000 字符时，卡片顶部额外提示
+  允许 / 拒绝按钮在正文之后。文件仍只预览前 `previewChars` 个字符，但卡片现在会写明文件
+  字节数、标记截断，并说明这是预览而非全文。
+- **抽屉单位修正**：文件条目按字节显示，备注按字符显示；英文「不限」计数补上
+  `no limit` 并区分单复数。
+- 测试：57 个用例（新增 root 判定、子代理拒绝、完整备注、文件预览截断、完整预览、默认 25 条、
+  显式上限、抽屉不限计数与单复数）。
 
 ### `0.7.0` 追的是 DSH `0.2.2-rc.1`（投影注册改为异步句柄）
 

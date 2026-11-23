@@ -41,7 +41,7 @@
 ## 核心结论（已对安装版运行时验证）
 
 1. 外部 plain-JS profile 插件可直接 `ctx.tools.register(手写对象)`：`parameters` 是普通 JSON Schema，不需要 zod/defineTool；框架**不校验参数**，工具自己校验。
-2. 工具全局注册；子代理用 `agent/created` + `agent.ctx.tools.restrict` 隐藏，执行时 `ctx.agents.roots()` 兜底。
+2. 工具全局注册；子代理用 `agent/created` + `agent.ctx.tools.restrict` 隐藏，执行时用 `agent.session.header.origin === 'subagent'` 兜底（0.8.0：`ctx.agents.roots()` 在 0.2.2-rc.5 已移除）。
 3. `ctx.userQuestions.askTimed` 是带自定义选项的阻塞问题通道，不依赖 approval policy；本会话 `never` 下可用。
 4. `ctx.storageDomain` 表 API 是 `put/update/delete/get`，**没有 `set`**；旧代码的 `.set` 已修正。domain 名必须匹配 `^[a-z][a-z0-9_]*$`：0.2.0 的 `plan-guard` 导致激活失败，0.2.1 改为 `plan_guard`，并加回归测试。
 5. `ctx.fs` 提供 `resolve/stat/streamText/contains/processPath`；会话 cwd 取 live `Session.header.cwd`（`workingDirectory` 服务已在新 runtime 删除，0.6.1 起不再使用；`header` 恒存在，无 cwd 则报明确错误）；读取在 pre-step 是官方模式（agent-instructions 同款）。
@@ -85,7 +85,7 @@
 - [x] 决策：插件方案（不 fork DSH）
 - [x] Host：storage 记录 v2、权限、文件读取、`context_guard`、Remote 9 方法、注入器
 - [x] Client：权限选择、Plan/条目列表、添加/锁定/删除、预览、双语
-- [x] 纯逻辑测试 + 假 ctx 集成测试（48 个用例通过）
+- [x] 纯逻辑测试 + 假 ctx 集成测试（0.8.0：57 个用例通过）
 - [x] `node --check index.js/client.js`
 - [x] 安装与启动验收（0.2.4，独立 profile + 无头 Chrome）：页面不再 “Failed to load plugins”，
       “New tab” 出现 Guarded context，抽屉渲染政策/Plan/条目三个区并成功 `remote.list`
@@ -101,6 +101,7 @@
 - [x] 0.6.0：抽屉预览 markdown 化（`MarkdownText` compact + 文件项"在阅览器中打开"按钮，可选 require + 纯文本降级，Host 零改动），44/44 测试
 - [x] 0.6.1：`add_file` 改读 live `Session.header.cwd`（`workingDirectory` 服务已删），45/45 测试
 - [x] 0.6.2：抽屉预览内联到展开条目正下方（`.pg-entry` 固定「卡片 → 预览」）、预览面板化（边框/左边线/`bg-layer-2`/`label-primary`，弃用 compact）、标题箭头 + 常驻收起 + 焦点回归、请求序号 + `content.id` 防串台，47/47 测试
+- [x] 0.8.0：root 判定改用 `Session.header.origin`（rc.5 移除 `agents.roots`）、`maxItems` 默认 0（不限）、权限问题卡片按 `maxCharsPerNote` 展示完整备注、文件预览标注真实字节数与截断，抽屉按 kind 显示字节/字符，57/57 测试
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
 - [ ] 压缩时刻验收（真实压缩触发后快照替换增量）、权限矩阵、问题卡片、抽屉轮询刷新
 
@@ -133,12 +134,13 @@
 - `packages/context/agent-instructions/src/index.ts:334-360` pre-step 注入模板
 - `packages/client/ui-tool/src/client/tool/ToolCallTree.tsx` 默认 GenericToolCard
 - `packages/api/gateway/src/index.ts` SRC 发现
+- `packages/agent/agent/src/runtime-types.ts` `Agent.session.header.origin`（root/subagent 判定；0.2.2-rc.5 无 `agents.roots()`）
 
 ## 验证
 
 - 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（43/43）。
 - 已跑：独立 profile 安装 + `dsh web` 启动 + 无头 Chrome（浅/深色截图、抽屉增删挂载、guide 图标、控制台零报错）。
 - 已跑：真实模型回合三条注入（快照 / 新增增量 / 卸载一行），直接读会话 jsonl 核对。
-- 未跑：压缩时刻、问题卡片、权限矩阵、重启/恢复自愈。
+- 未跑：压缩时刻、问题卡片滚动（内置卡片）、权限矩阵、重启/恢复自愈。
 - 后续：`plugin_manager install_bundle` → 重启 → `cordis_inspect_query` Tool/Slots →
   抽屉矩阵 → 工具权限矩阵 → `dsh-compaction-tune` 强制压缩（`set-ratio.mjs 0.01 --retain 0.0005`，测试后恢复）→ 重启/恢复自愈。

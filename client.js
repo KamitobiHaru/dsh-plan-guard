@@ -87,6 +87,8 @@ window.__ModuleLoader__.load({
         'items.collapse': 'Hide content',
         'items.empty': 'Nothing pinned yet.',
         'items.limit': '{count} of {max} items',
+        'items.count': '{count} items (no limit)',
+        'items.countOne': '{count} item (no limit)',
         'items.mounted': 'Mounted',
         'items.unmounted': 'Unmounted',
         'items.locked': 'Locked',
@@ -98,7 +100,9 @@ window.__ModuleLoader__.load({
         'items.cancel': 'Cancel',
         'items.addedByHuman': 'human',
         'items.addedByModel': 'model',
-        'items.meta': '{kind} · {state} · {by} · {size} chars',
+        'items.meta': '{kind} · {state} · {by} · {size}',
+        'items.bytes': '{size} bytes',
+        'items.chars': '{size} chars',
         'items.mountHint': 'Mount this item',
         'items.unmountHint': 'Unmount this item',
         'items.contentError': 'This content could not be read:',
@@ -161,6 +165,8 @@ window.__ModuleLoader__.load({
         'items.collapse': '收起内容',
         'items.empty': '还没有固定任何内容。',
         'items.limit': '{count}/{max} 条',
+        'items.count': '{count} 条（不限）',
+        'items.countOne': '{count} 条（不限）',
         'items.mounted': '已挂载',
         'items.unmounted': '未挂载',
         'items.locked': '已锁定',
@@ -172,7 +178,9 @@ window.__ModuleLoader__.load({
         'items.cancel': '取消',
         'items.addedByHuman': '人类',
         'items.addedByModel': '模型',
-        'items.meta': '{kind} · {state} · {by} · {size} 字符',
+        'items.meta': '{kind} · {state} · {by} · {size}',
+        'items.bytes': '{size} 字节',
+        'items.chars': '{size} 字符',
         'items.mountHint': '挂载这个条目',
         'items.unmountHint': '卸载这个条目',
         'items.contentError': '无法读取该内容：',
@@ -1003,11 +1011,14 @@ window.__ModuleLoader__.load({
 
     function ItemRow({ item, busy, expanded, preview, titleRef, deleteConfirm, onToggle, onLock, onDelete, onConfirmDelete, onCancelDelete, onExpand, onOpenViewer, t }) {
       const stateLabel = item.mounted ? t('items.mounted') : t('items.unmounted')
+      const size = item.kind === 'file'
+        ? t('items.bytes').replace('{size}', String(item.size ?? 0))
+        : t('items.chars').replace('{size}', String(item.size ?? 0))
       const meta = t('items.meta')
         .replace('{kind}', item.kind === 'file' ? t('items.kindFile') : t('items.kindNote'))
         .replace('{state}', item.locked ? stateLabel + ' · ' + t('items.locked') : stateLabel)
         .replace('{by}', item.createdBy === 'human' ? t('items.addedByHuman') : t('items.addedByModel'))
-        .replace('{size}', String(item.size))
+        .replace('{size}', size)
       return h('div', { className: 'pg-entry' + (expanded === true ? ' pg-entryExpanded' : '') },
         h('div', { className: 'pg-card' },
           h(Switch, {
@@ -1238,7 +1249,7 @@ window.__ModuleLoader__.load({
       const limits = isRecord(state.limits) ? state.limits : {}
       const policy = state.policy ?? state.defaultPolicy ?? 'ask'
       const noteMax = typeof limits.maxCharsPerNote === 'number' ? limits.maxCharsPerNote : 20000
-      const itemMax = typeof limits.maxItems === 'number' ? limits.maxItems : 24
+      const itemMax = typeof limits.maxItems === 'number' ? limits.maxItems : 0
       const planRows = plans.slice().reverse().map(plan => h(PlanRow, {
         key: plan.callId,
         plan,
@@ -1356,7 +1367,9 @@ window.__ModuleLoader__.load({
           h('div', { className: 'pg-sectionHead' },
             h('h3', { className: 'pg-caption' }, t('items.section')),
             h('span', { className: 'pg-count' },
-              t('items.limit').replace('{count}', String(items.length)).replace('{max}', String(itemMax))),
+              itemMax > 0
+                ? t('items.limit').replace('{count}', String(items.length)).replace('{max}', String(itemMax))
+                : t(items.length === 1 ? 'items.countOne' : 'items.count').replace('{count}', String(items.length))),
           ),
           items.length === 0 ? h('p', { className: 'pg-empty' }, t('items.empty')) : itemRows,
           addForm,
