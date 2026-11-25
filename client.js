@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
         'plans.explicitUnmounted': 'Unmounted by you',
         'plans.notAuto': 'Not auto-mounted',
         'plans.rejected': 'Rejected',
+        'plans.unconfirmed': 'Verdict unconfirmed',
         'plans.size': '{chars} chars',
         'plans.mountHint': 'Mount this plan',
         'plans.unmountHint': 'Unmount this plan',
@@ -92,6 +93,7 @@ window.__ModuleLoader__.load({
         'items.mounted': 'Mounted',
         'items.unmounted': 'Unmounted',
         'items.locked': 'Locked',
+        'items.changed': 'Changed on disk',
         'items.unlocked': 'Unlocked',
         'items.lock': 'Lock',
         'items.unlock': 'Unlock',
@@ -153,6 +155,7 @@ window.__ModuleLoader__.load({
         'plans.explicitUnmounted': '由你卸下',
         'plans.notAuto': '不自动挂载',
         'plans.rejected': '已拒绝',
+        'plans.unconfirmed': '结论未确认',
         'plans.size': '{chars} 字符',
         'plans.mountHint': '挂载这份计划',
         'plans.unmountHint': '卸下这份计划',
@@ -170,6 +173,7 @@ window.__ModuleLoader__.load({
         'items.mounted': '已挂载',
         'items.unmounted': '未挂载',
         'items.locked': '已锁定',
+        'items.changed': '磁盘已改动',
         'items.unlocked': '未锁定',
         'items.lock': '锁定',
         'items.unlock': '解锁',
@@ -975,7 +979,7 @@ window.__ModuleLoader__.load({
       else stateLabel = t('plans.notAuto')
       const meta = [
         stateLabel,
-        plan.accepted === false ? t('plans.rejected') : undefined,
+        plan.accepted === false ? t('plans.rejected') : plan.accepted === true ? undefined : t('plans.unconfirmed'),
         t('plans.size').replace('{chars}', String(plan.size)),
         typeof plan.turn === 'number' ? 'turn ' + String(plan.turn) : undefined,
       ].filter(part => typeof part === 'string' && part !== '').join(' · ')
@@ -1014,9 +1018,14 @@ window.__ModuleLoader__.load({
       const size = item.kind === 'file'
         ? t('items.bytes').replace('{size}', String(item.size ?? 0))
         : t('items.chars').replace('{size}', String(item.size ?? 0))
+      const state = [
+        stateLabel,
+        item.locked ? t('items.locked') : undefined,
+        item.kind === 'file' && item.changedPending === true ? t('items.changed') : undefined,
+      ].filter(part => typeof part === 'string' && part !== '').join(' · ')
       const meta = t('items.meta')
         .replace('{kind}', item.kind === 'file' ? t('items.kindFile') : t('items.kindNote'))
-        .replace('{state}', item.locked ? stateLabel + ' · ' + t('items.locked') : stateLabel)
+        .replace('{state}', state)
         .replace('{by}', item.createdBy === 'human' ? t('items.addedByHuman') : t('items.addedByModel'))
         .replace('{size}', size)
       return h('div', { className: 'pg-entry' + (expanded === true ? ' pg-entryExpanded' : '') },

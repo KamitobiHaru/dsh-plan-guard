@@ -2,23 +2,23 @@
 
 给 DSH（DeepSeek Harness）的**守护上下文**插件：让 Plan、备注、文件跨上下文压缩持续可见。DSH 的压缩会把一段会话换成摘要检查点，模型随后只看得到摘要；本插件把当前守护内容拼成一条 user 消息注入：surface 上没有守护消息时（首次，或压缩把旧消息换成摘要检查点之后）发**完整快照**，**守护集合有变更的下一步**发**增量**（新增发正文，卸载只发一句提示），模型不必重新翻文件，人类也不必重述约束。
 
-- **只自动挂载最新 Plan，且只挂通过的**：首次压缩后，最新一份**已接受**的 Plan 自动生效；被用户拒绝的 Plan 留在列表里但永不自动挂载（可手动挂载）。人类在此之前卸下，就一直保持未挂载。旧 Plan 留在列表里，可随时手动挂载。
+- **只自动挂载最新 Plan，且只挂确认批准通过的**：首次压缩后，最新一份**已批准**的 Plan 自动生效。被用户拒绝的、以及结论读不出来的 Plan 留在列表里但永不自动挂载（可手动挂载）。人类在此之前卸下，就一直保持未挂载。旧 Plan 留在列表里，可随时手动挂载。
 - **新自动 Plan 顶掉旧自动 Plan**：新批准的计划自动挂载时，上一个**自动挂载**的计划收到一行 `Plan "…" (<callId>) is no longer guarded.`；人类显式挂载的 Plan 和 pinned 条目不受影响。该记账走内部 op，不问权限。
 - **模型可增不可删**：模型能加备注/文件、挂载/卸载；不能动 Plan，也不能删除任何条目（包括自己加的，留痕审计）。删除只有人类能做。
 - **权限归人类**：会话级五档权限 + 条目级锁定；模型动作可以要求对话内批准，拒绝/超时都不写入。
 - **变更立刻可见**：新增内容在下一个 step 就能被模型看到，卸载只在尾部追加一行提示，不等压缩。
-- **文件实时读**：注入时才按工作区复核并读取文件，不存快照，避免把过期内容当约束。
+- **文件改动自动更新**：注入时才按工作区复核并读取文件，不存快照；每个 step 再对挂载的文件做一次 `stat`，版本变了才读正文——真变了就在下一步把新全文重送一遍（段标题带 `(changed)`），内容没变（`touch`、重写同内容）只更新记账。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.8.0 状态**：Host/Client 实现与 57 个测试已完成。0.8.0 适配 DSH 0.2.2-rc.5（`ctx.agents.roots()` 已移除，root/subagent 改用 `Session.header.origin`）、默认取消条目数量上限、权限问题卡片展示完整备注并准确标记文件预览截断；0.7.0 的异步投影、0.6.2 的抽屉预览与 0.6.1 的 `add_file` 修复都在。需重启 `dsh web` 生效。
+> **v0.9.0 状态**：Host/Client 实现与 72 个测试已完成。0.9.0 修掉「没批准的计划也会被挂载」——`exit_plan_mode` 的通过与拒绝在当前运行时**都是 `isError: false` 的成功结果**，结论改从结果正文与 `plan/mode` 事件判定，并改成 fail-closed：只有确认批准的计划才自动挂载；同时新增挂载文件的磁盘改动自动更新（每步一次 `stat`，正文真变了才重送）。0.8.0 适配 DSH 0.2.2-rc.5（`ctx.agents.roots()` 已移除，root/subagent 改用 `Session.header.origin`）、默认取消条目数量上限、权限问题卡片展示完整备注并准确标记文件预览截断；0.7.0 的异步投影、0.6.2 的抽屉预览与 0.6.1 的 `add_file` 修复都在。需重启 `dsh web` 生效。
 
 ## 工作原理
 
 DSH 的会话日志是追加式的：压缩不删除事件，只是把一段事件从模型可见的 surface 里移走，换成一条检查点。Plan 正文本来就只存在于日志中 `exit_plan_mode` 的 `tool/call` 参数里，所以插件不复制 Plan：
 
-1. **Plan 投影**：`sessionProjections` 从会话日志折叠出一份轻量投影 `plan-guard-docs`，记录每个 `exit_plan_mode`（含 PTC 派发）的 callId、标题、大小、提交轮次和 markdown（单条上限 64k），并记住是否发生过一次成功压缩，以及每份计划是被接受还是被拒（从同 callId 的 `tool/result` 的 `isError` 折叠）。被拒的计划只展示、不自动挂载。
+1. **Plan 投影**：`sessionProjections` 从会话日志折叠出一份轻量投影 `plan-guard-docs`，记录每个 `exit_plan_mode`（含 PTC 派发）的 callId、标题、大小、提交轮次和 markdown（单条上限 64k），并记住是否发生过一次成功压缩。批准/拒绝的结论从**结果正文**读（`tool/result`，PTC 走 `tool/ptc-dispatch`）：当前运行时两个方向都是成功结果，`isError` 只在硬失败时为真，所以判定靠正文里的 `Plan approved` / `dismissed`。正文认不出来时先挂起，若紧接着出现 `plan/mode {active:false}`（退出计划模式，批准路径的结构标记）就算批准；中间被 `user/message` / `tool/call` / `command/run` 打断就永远算「未确认」。**未确认与被拒同样处理：不自动挂载**。
 2. **守护记录**：抽屉和工具把人类的选择写进 storage domain `plan-guard` 的 `sessions` 表，每个 session 一条 `{version: 2, policy, plans, items}`。Plan 只在记录里存 `mounted` / `unmounted` 标记；备注正文存记录，文件只存路径与元数据。
-3. **注入时机**：`agent/pre-step` 瀑布在 `await next()` 之后拼一条 user 消息，插在本次进入的消息之后、runtime-context 之前。三条触发线：surface 上还没有守护消息时（首次注入，或压缩把它换成了摘要检查点）发**完整快照**；守护集合有变更时发**增量**；新批准计划自动挂载时，内部 `syncAutoPlans` 先把它的 `added` 与旧自动计划的 `removed` 记进日记（人类显式选择不碰），随增量同发。消息由 agent-loop 记成 `user/message`，满足「模型可见 ⟺ 已记录」。
+3. **注入时机**：`agent/pre-step` 瀑布在 `await next()` 之后拼一条 user 消息，插在本次进入的消息之后、runtime-context 之前。三条触发线：surface 上还没有守护消息时（首次注入，或压缩把它换成了摘要检查点）发**完整快照**；守护集合有变更时发**增量**；挂载的文件在磁盘上被改动（`stat` 的版本变了、正文摘要也确实不同）时也发**增量**，把新全文重送一遍。新批准计划自动挂载时，内部 `syncAutoPlans` 先把它的 `added` 与旧自动计划的 `removed` 记进日记（人类显式选择不碰），随增量同发。消息由 agent-loop 记成 `user/message`，满足「模型可见 ⟺ 已记录」。
 4. **增量只追加**：新增条目发正文（与快照同一套 `## Plan` / `## Note` / `## File` 段落）；卸载或删除只发一句 `Note "…" (note:…) is no longer guarded.`（标题加唯一编号）。所有注入都追加在请求尾部，历史消息一字不改，所以 KV cache 的前缀照常复用；这段文字留到下次压缩为止。
 5. **不重复、可恢复**：变更记在记录的 `pending` 日记里（按条目合并，add 与 remove 互相抵消），注入成功后按 key 清除；进程重启后日记还在，下一步补发。压缩后的快照覆盖此前所有未送达的变更。
 6. **抽屉读活会话**：右侧栏抽屉通过 `dsh-resource://plan-guard-drawer/<sessionId>` 资源轮询，Host 端是 9 个 Remote 方法（list / policy / plan / item / note / file / content 等）。
@@ -79,22 +79,24 @@ item: file:...
 <file content>
 ```
 
-有变更时（消息已可见），只注入增量——新增发正文，卸载发一句：
+有变更时（消息已可见），只注入增量——新增发正文，卸载发一句，文件被改动重发全文：
 
 ```text
 Guarded context (plans, notes, files) — update
 Background context, not a new request.
 
-## Note: 发布前不要改 schema
-item: note:...
-
-<note text>
-
 Note "不要改动公开 API" (note:…) is no longer guarded.
+File src/core/store.ts (file:…) changed on disk; the section below is its current content.
+
+## File: src/core/store.ts (changed)
+item: file:…
+
+<current file content>
 ```
 
 - **Plan 从日志推导**，不复制正文到 storage；取不到时给标记，不会中断注入。
 - **备注正文存 storage**；**文件在注入时实时读取**：添加时记下绝对路径和当时的 workspace root，注入时复核仍在该 root 内（除非显式允许越界），然后读最新内容。缺失、二进制、越界、超大都会写成可见标记，不会静默丢弃，也不会让 step 失败。
+- **文件带「记账」**：每次注入把实际送出的正文摘要与 `stat` 版本（`dev:ino:size:mtime:ctime`）写回条目。下一步只做一次 `stat`：版本没动就什么都不发生；动了才读正文比对摘要，确实不同才重发。所以 `touch`、`git checkout` 重写同内容、或改动落在 `maxCharsPerFile` 截断之外，都不会打扰模型。
 - **四层上限**：单 Plan、单文件、单备注、总字符。超出时截断并标记；总上限溢出时按顺序保留，剩下的以省略 id 列出。
 - 快照只在 surface 上没有守护消息时发送；增量每条变更只发一次，卸载不重发正文。
 
@@ -113,7 +115,8 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 | `maxTotalChars` | `100000` | 全部注入内容总上限 |
 | `maxItems` | `0` | 备注 + 文件条目上限；`0` = 不限（Plan 不计） |
 | `defaultPolicy` | `ask` | 没有存储记录时使用的权限模式 |
-| `autoMountLatestPlan` | `true` | 首次压缩后自动挂载最新 Plan（被拒的不挂） |
+| `autoMountLatestPlan` | `true` | 首次压缩后自动挂载最新 Plan（被拒、结论未确认的不挂） |
+| `refreshChangedFiles` | `true` | 每步探测挂载文件的磁盘改动，正文变了就重送；关掉后只在注入时读 |
 | `askTimeoutMs` | `120000` | 权限问题等待上限 |
 | `allowOutsideWorkspace` | `false` | 允许挂载工作区外的绝对路径文件 |
 | `previewChars` | `4000` | `add_file` 返回的预览上限 |
@@ -124,7 +127,7 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 前置：可用的 DSH（开发验证于 `0.2.2-rc.5` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.8.0
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.9.0
 
 **方式一：命令行** —— 上面的命令。
 
@@ -139,10 +142,10 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 右侧栏 guide 页 →「上下文守护」打开抽屉：
 
 - **顶部**：选择模型权限，改动立即生效，写入当前会话记录。
-- **Plans**：开关切换挂载；「自动」表示等首次压缩后自动挂载；「已拒绝」表示计划没通过，永不自动挂载（仍可手动挂载）；「恢复自动」清除人类的显式选择；点标题或右侧箭头展开，预览紧贴该计划下方，右上角「收起」。
-- **已固定条目**：开关挂载/卸载；锁形按钮锁定/解锁（锁后模型完全不能改）；删除需两步确认；点标题或右侧箭头展开，预览紧贴该条目下方，右上角「收起」。
+- **Plans**：开关切换挂载；「自动」表示等首次压缩后自动挂载；「已拒绝」/「结论未确认」表示这份计划没有拿到批准，永不自动挂载（仍可手动挂载）；「恢复自动」清除人类的显式选择；点标题或右侧箭头展开，预览紧贴该计划下方，右上角「收起」。
+- **已固定条目**：开关挂载/卸载；锁形按钮锁定/解锁（锁后模型完全不能改）；删除需两步确认；文件条目在改动待送达时标「磁盘已改动」；点标题或右侧箭头展开，预览紧贴该条目下方，右上角「收起」。
 - **添加**：「添加备注」（标题 + 正文）或「添加文件」（工作区路径，服务端校验存在、UTF-8、在 workspace 内）。
-- **Plan 的四种状态**：自动（最新、已压缩、已接受）/ 已挂载（人类显式）/ 已卸下（人类显式，之后不再自动挂载）/ 已拒绝（计划没通过，永不自动挂载）。旧 Plan 默认卸下，仍可手动挂载；上一个自动 Plan 会被新自动 Plan 顶掉（只发一行提示，不写显式选择，"恢复自动"语义不变）。
+- **Plan 的五种状态**：自动（最新、已压缩、已确认批准）/ 已挂载（人类显式）/ 已卸下（人类显式，之后不再自动挂载）/ 已拒绝（计划被驳回）/ 结论未确认（日志里读不出批准证据）。后三种都不自动挂载，人类仍可手动挂。旧 Plan 默认卸下，仍可手动挂载；上一个自动 Plan 会被新自动 Plan 顶掉（只发一行提示，不写显式选择，"恢复自动"语义不变）。
 
 挂载/卸载在**下一步**就进入模型上下文；模型动作需要权限时，对话里出现问题卡片，允许后工具在同一次调用里完成，拒绝/超时则不写入。
 
@@ -152,7 +155,10 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 - **尚未做压缩矩阵验收**：v0.4.0 已在临时安装里跑过真实模型回合（快照、新增增量、卸载一行三条注入都对），但「压缩发生的那一刻」、问题卡片、权限矩阵与抽屉轮询刷新还没在真实会话里逐一跑过。
 - **抽屉只读活会话**：会话未恢复时显示提示，不能编辑；归档会话的读取（projection `wire.view`）未做。
-- **卸载提示只是一句话**：`… (<id>) is no longer guarded.` 不会删掉历史里的旧正文；旧正文要等下次压缩才真正离开 surface。
+- **卸载提示只是一句话**：`… (<id>) is no longer guarded.` 不会删掉历史里的旧正文；旧正文要等下次压缩才真正离开 surface。文件被改动时同理：新的 `(changed)` 段追加在尾部，旧正文留在历史上直到下次压缩。
+- **批准判定靠结果正文的关键词**：`Plan approved` / `dismissed` 是当前运行时 `exit_plan_mode` 渲染出的英文文本（两个方向都是成功结果，`isError` 帮不上）。DSH 若改文案，结论会退化成「未确认 → 不自动挂载」，只会漏挂、不会误挂；`plan/mode {active:false}` 作为结构佐证兜住一部分。
+- **首次探测前的等长改动**：升级到 0.9.0 时已有条目没有记账，第一次 `stat` 只在字节数变化时判定为改动；升级期间发生的等长改动要等下次真实改动或压缩快照才纠正。
+- **文件改动会占用总上限**：挂载很多大文件时，一次改动重发的正文与其余内容共享 `maxTotalChars`；挤不下时该条目只在省略标记里出现 id，正文要等下次快照或下一次真实改动。
 - **pending 有上限**：最多记 200 条未送达变更，超出丢最旧的；长时间停用注入（`disabled`）时可能少报几条。
 - **默认不限条目数量**：`maxItems: 0` 时 storage 会随备注/文件增长；进入模型上下文的内容仍受单条与 `maxTotalChars` 上限约束。需要硬上限时在 config 里把 `maxItems` 设为正整数。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
@@ -171,10 +177,22 @@ Note "不要改动公开 API" (note:…) is no longer guarded.
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（57 个用例）。测试用假 Cordis ctx / 假模块表，覆盖权限矩阵、Plan 自动/显式/接受/顶替状态、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.8.0` ↔ `v0.8.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（72 个用例）。测试用假 Cordis ctx / 假模块表 / 假文件系统（可变文件表 + `stat`/读取计数），覆盖权限矩阵、Plan 自动/显式/批准/拒绝/未确认/顶替状态、真实会话日志的 `exit_plan_mode` 事件形状、文件改动探测与记账、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.9.0` ↔ `v0.9.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`（0.2.2 起为异步注册，启动时 `await` 并持有句柄）、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在 pre-step 只追加注入消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.9.0` 修「没批准也挂载」+ 挂载文件自动更新（结论改读正文与 `plan/mode`）
+
+- **根因**：0.4.0–0.8.0 用 `tool/result` 的 `isError` 判批准，但当前 `dsh-plan-mode` 把通过与拒绝都渲染成**成功**结果（`lib/index.js:257` 只换正文：`Plan approved — plan mode exited; …` / `The user dismissed the plan review to reply in their own words; plan mode remains active.`），`isError` 恒为 `false` → 被驳回的计划折叠成 `accepted: true`，再叠上 `doc.accepted !== false` 这条 fail-open 判定，任何计划都会在首次压缩后被自动挂载。真实日志实证：会话 `session-40d81a8e…` seq 1222/1223 被拒、seq 1271/1272+1274 批准，而投影缓存 `plan-guard-docs` 行把两者都记成 `accepted: true`。单元测试当时用的是手造扁平事件 + `isError: true` + 旧文案，所以没暴露。
+- **判定重写**：新增纯函数 `planVerdict(data)`——先读嵌套 `data.message` 回退扁平（兼容旧日志）；`isError === true` 直接算拒绝；否则按正文关键词判 `dismissed` / `Plan approved`；认不出来返回 `undefined`。正文认不出时记下 `awaitingVerdict`，若紧接着出现 `plan/mode {active:false}`（批准才有的结构标记，实测在 result 之后、下一个 step 的 `pre-step` 落账）结算为批准；中间出现 `tool/call` / `tool/ptc-dispatch-start` / `user/message` / `command/run` 则撤销归因，结论停在「未确认」。
+- **PTC 派发也有结论了**：`run_code` 子调用的结果写在 `tool/ptc-dispatch`（按 `subCallId` 配对，见 `dsh-tool-executor-ptc/src/ptc.ts:560-573`），此前 fold 完全不认，导致 PTC 提交的计划永远「未知 → 被 fail-open 当成批准」。
+- **fail-closed**：`effectivePlanState` 的自动挂载资格改为 `doc.accepted === true`。被拒与未确认的计划只展示、不自动挂载；人类显式挂载照旧优先。投影 `stateVersion 3 → 4`，重启后旧缓存整表重折，历史误判一次性结算；storage 记录仍是 version 2，0.8.0 读新记录只会忽略新字段（可降级）。
+- **挂载文件自动更新**：文件条目新增记账字段 `seenVersion` / `seenDigest` / `seenAt`（`normalizeItemStrict` 白名单保留，否则 storage 读回时被抹掉）；`observeFileChanges` 每步对挂载文件做一次 `fs.stat`（版本 = `dev:ino:size:mtimeNs:ctimeNs`），版本没动就零读盘；动了才读正文并比对 sha256，确实不同才记 `pending.changed` 并在增量里重发 `## File: <path> (changed)` 全文 + 一行「以本次为准」。`touch`、重写同内容、越出 `maxCharsPerFile` 的尾部改动都不打扰模型；文件缺失先报一次 `file unreadable`，之后停在 `missing` 记账不重复。config 加 `refreshChangedFiles`（默认 `true`）。
+- **pending 日记加第三桶 `changed`**：与 `added`/`removed` 互抵（新增未送达时改动不重复记；卸载吃掉改动记录），仍受 200 条上限。盖章只在消息真的注入后随清账一次写入（`deliver`），失败的 step 下个 step 自愈。
+- **可见性**：抽屉计划行新增「结论未确认 / Verdict unconfirmed」标记，文件条目在待送达改动时标「磁盘已改动 / Changed on disk」；`context_guard list` 输出同步（`rejected; never auto-mounts` / `verdict unconfirmed; never auto-mounts` / `changed on disk; its current content is sent on the next step`）；工具描述与快照头去掉「只要没被拒」的说法，改为「只有明确批准的计划才会自动挂载」并说明 `(changed)` 段覆盖旧正文。
+- **离线重放验收**：把本机 30 个真实会话日志逐事件喂给新 fold——12 份计划、批准 10 / 拒绝 2 / 未确认 0，与旧 fold 相比恰好 2 处由 `true` 翻成 `false`（会话 `session-ca9aa2…` 与 `session-40d81a8e…` 各一份被驳回的计划，正文均为 `The user dismissed the plan review…`）。
+- 测试：72 个用例（新增当前运行时拒绝形状、PTC 结论、`plan/mode` 佐证与撤销、未确认不自动挂载、`changed` 桶合并、`(changed)` 段、文件改动端到端与读盘计数、缺失只报一次、开关关闭、抽屉新标记）。
 
 ### `0.8.0` 追的是 DSH `0.2.2-rc.5`（root 判定、条目上限、完整备注卡片）
 

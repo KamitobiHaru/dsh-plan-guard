@@ -1,43 +1,47 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { apply, PLAN_DOCS_PROJECTION_KEY, SERVICE_KEY, TOOL_NAME } from '../index.js'
+import { apply, PLAN_DOCS_PROJECTION_KEY, SERVICE_KEY, TOOL_NAME, __testables as t } from '../index.js'
 
 const SESSION_ID = 's1'
 
+/**
+ * Filesystem fake with a mutable file table and call counters, so a test can
+ * rewrite a mounted file between steps and assert what the probe read.
+ */
 function fakeFs() {
   const root = { targetKey: '/repo', displayPath: '/repo' }
-  const file = { targetKey: '/repo/src/a.ts', displayPath: '/repo/src/a.ts' }
+  const files = new Map([
+    ['/repo/src/a.ts', { version: 'v1', size: 19, text: 'export const a = 1' }],
+    ['/repo/big.txt', { version: 'v2', size: 6000, text: 'q'.repeat(6000) }],
+  ])
+  const counts = { stat: 0, read: 0 }
+  const named = (path, cwd) => {
+    if (path === '/repo') return root
+    if (path.startsWith('/repo/')) return { targetKey: path, displayPath: path }
+    if (typeof cwd === 'string') return { targetKey: `/repo/${path}`, displayPath: `/repo/${path}` }
+    return { targetKey: path, displayPath: path }
+  }
   return {
-    async resolve(path, opts = {}) {
-      if (path === '/repo') return root
-      if (path === '/repo/src/a.ts') return file
-      if (path === 'src/a.ts' && opts.cwd === '/repo') return file
-      if (path === 'src/missing.ts' && opts.cwd === '/repo') {
-        const missing = { targetKey: '/repo/src/missing.ts', displayPath: '/repo/src/missing.ts' }
-        return missing
-      }
-      if (path === 'big.txt' && opts.cwd === '/repo') {
-        return { targetKey: '/repo/big.txt', displayPath: '/repo/big.txt' }
-      }
-      return { targetKey: path, displayPath: path }
-    },
+    counts,
+    /** Replace one file's on-disk state; `version` is what the probe compares. */
+    writeFile(path, value) { files.set(path, value) },
+    removeFile(path) { files.delete(path) },
+    async resolve(path, opts = {}) { return named(path, opts.cwd) },
     async stat(target) {
+      counts.stat += 1
       if (target.targetKey === '/repo') return { type: 'directory', version: 'v0' }
-      if (target.targetKey === '/repo/src/a.ts') return { type: 'file', size: 19, version: 'v1' }
-      if (target.targetKey === '/repo/big.txt') return { type: 'file', size: 6000, version: 'v2' }
-      return undefined
+      const file = files.get(target.targetKey)
+      if (file === undefined) return undefined
+      return { type: 'file', size: file.size, version: file.version }
     },
     processPath(target) { return target.targetKey },
     contains(parent, child) { return child.targetKey === parent.targetKey || child.targetKey.startsWith(`${parent.targetKey}/`) },
     async streamText(target) {
-      if (target.targetKey === '/repo/big.txt') {
-        return (async function* chunks() {
-          yield 'q'.repeat(600)
-        })()
-      }
-      assert.equal(target.targetKey, '/repo/src/a.ts')
+      const file = files.get(target.targetKey)
+      if (file === undefined) throw new Error(`ENOENT: no such file, open '${target.targetKey}'`)
+      counts.read += 1
       return (async function* chunks() {
-        yield 'export const a = 1'
+        for (let at = 0; at < file.text.length; at += 600) yield file.text.slice(at, at + 600)
       })()
     },
   }
@@ -339,7 +343,7 @@ test('service mutation methods return refreshed state and content reads files', 
 test('service setPlan writes explicit choices and clears to auto', async () => {
   const fake = await setup()
   fake.setProjection({
-    docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one', turn: 1 }],
+    docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one', turn: 1, accepted: true }],
     sawCompaction: true,
   })
   const service = fake.provided.get(SERVICE_KEY)
@@ -354,6 +358,24 @@ test('service setPlan writes explicit choices and clears to auto', async () => {
   state = await service.setPlan(SESSION_ID, 'p1', 'auto')
   assert.equal(state.plans[0].mounted, true)
   assert.equal(state.plans[0].explicit, null)
+})
+
+test('a dismissed or unconfirmed plan stays unmounted until a human mounts it', async () => {
+  const fake = await setup()
+  const service = fake.provided.get(SERVICE_KEY)
+  for (const verdict of [undefined, false]) {
+    fake.setProjection({
+      docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one', turn: 1, accepted: verdict }],
+      sawCompaction: true,
+    })
+    const state = await service.list(SESSION_ID)
+    assert.equal(state.plans[0].mounted, false, `verdict ${String(verdict)} never auto-mounts`)
+    assert.equal(state.plans[0].autoEligible, false)
+    assert.equal(state.plans[0].awaitingCompaction, false)
+    const mounted = await service.setPlan(SESSION_ID, 'p1', 'mounted')
+    assert.equal(mounted.plans[0].mounted, true, 'a human mount still works')
+    await service.setPlan(SESSION_ID, 'p1', 'auto')
+  }
 })
 
 test('a dismissed plan stays listed but never auto-mounts', async () => {
@@ -395,7 +417,7 @@ async function preStep(fake, { turn = 1, step = 2, empty = false } = {}) {
 test('pre-step injector sends the full snapshot while nothing is visible', async () => {
   const fake = await setup()
   fake.setProjection({
-    docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one\nbody', turn: 1 }],
+    docs: [{ callId: 'p1', title: 'Plan one', markdown: '# Plan one\nbody', turn: 1, accepted: true }],
     sawCompaction: true,
   })
   const service = fake.provided.get(SERVICE_KEY)
@@ -410,7 +432,12 @@ test('pre-step injector sends the full snapshot while nothing is visible', async
   assert.match(injected.content[0].text, /Constraint/)
   assert.match(injected.content[0].text, /export const a = 1/)
   // The snapshot accounted for every journal entry.
-  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, removed: {} })
+  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, changed: {}, removed: {} })
+  // Every mounted file leaves a sighting of the exact bytes just delivered.
+  const sighted = Object.values(fake.records.get(SESSION_ID).items).find(item => item.kind === 'file')
+  assert.equal(sighted.seenVersion, 'v1')
+  assert.equal(typeof sighted.seenDigest, 'string')
+  assert.ok(sighted.seenDigest.length > 0)
 
   surfaceVisible(fake, injected)
   const again = await preStep(fake, { turn: 2 })
@@ -560,7 +587,7 @@ test('lock and policy changes inject nothing', async () => {
   const note = Object.values(record.items)[0]
   await service.setLock(SESSION_ID, note.id, true)
   await service.setPolicy(SESSION_ID, 'deny-all')
-  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, removed: {} })
+  assert.deepEqual(fake.records.get(SESSION_ID).pending, { added: {}, changed: {}, removed: {} })
   const result = await preStep(fake, { turn: 2 })
   assert.equal(result.messages.length, 1)
 })
@@ -580,4 +607,186 @@ test('the file permission card reports the real size and marks a capped preview'
   assert.match(detail, /first 500 characters shown/)
   assert.match(detail, /\[… truncated \/ 已截断\]/)
   assert.equal(detail.includes('scroll inside the card to read it'), false)
+})
+
+/** The one file item in the stored record. */
+const onlyFile = (fake) => Object.values(fake.records.get(SESSION_ID).items).find(item => item.kind === 'file')
+
+test('a mounted file rewritten on disk is re-injected in full on the next step', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'src/a.ts')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+  assert.match(first.messages[1].content[0].text, /## File: src\/a\.ts/)
+  assert.equal(onlyFile(fake).seenVersion, 'v1', 'the snapshot leaves a sighting')
+
+  fake.ctx.fs.writeFile('/repo/src/a.ts', { version: 'v9', size: 25, text: 'export const a = 42 // edited' })
+  const changed = await preStep(fake, { turn: 2 })
+  assert.equal(changed.messages.length, 2)
+  const text = changed.messages[1].content[0].text
+  assert.match(text, /— update/)
+  assert.match(text, /File src\/a\.ts \(file:[0-9a-f-]+\) changed on disk; the section below is its current content\./)
+  assert.match(text, /## File: src\/a\.ts \(changed\)/)
+  assert.match(text, /export const a = 42 \/\/ edited/)
+
+  const stamped = onlyFile(fake)
+  assert.equal(stamped.seenVersion, 'v9')
+  assert.equal(stamped.size, 25)
+  const reads = fake.ctx.fs.counts.read
+  const statsBefore = fake.ctx.fs.counts.stat
+
+  const quiet = await preStep(fake, { turn: 3 })
+  assert.equal(quiet.messages.length, 1, 'a delivered refresh is not repeated')
+  assert.equal(fake.ctx.fs.counts.read, reads, 'an unchanged version never re-reads the body')
+  assert.equal(fake.ctx.fs.counts.stat, statsBefore + 1, 'a quiet step costs one stat')
+
+  const listed = await fake.tool().execute({ action: 'list' }, execFor(fake, 'call-list'))
+  assert.ok(!/changed on disk/.test(listed.text), 'a delivered refresh clears the pending flag')
+})
+
+test('a same-bytes rewrite restamps silently and a second edit still reports', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'src/a.ts')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  fake.ctx.fs.writeFile('/repo/src/a.ts', { version: 'v3', size: 19, text: 'export const a = 1' })
+  const touched = await preStep(fake, { turn: 2 })
+  assert.equal(touched.messages.length, 1, 'identical bytes never reach the model')
+  assert.equal(onlyFile(fake).seenVersion, 'v3', 'the new version is still recorded')
+
+  fake.ctx.fs.writeFile('/repo/src/a.ts', { version: 'v4', size: 21, text: 'export const a = 1\n//' })
+  const edited = await preStep(fake, { turn: 3 })
+  assert.equal(edited.messages.length, 2)
+  assert.match(edited.messages[1].content[0].text, /## File: src\/a\.ts \(changed\)/)
+})
+
+test('a deleted mounted file is reported once, not on every step', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'src/a.ts')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  fake.ctx.fs.removeFile('/repo/src/a.ts')
+  const gone = await preStep(fake, { turn: 2 })
+  assert.equal(gone.messages.length, 2)
+  assert.match(gone.messages[1].content[0].text, /changed on disk/)
+  assert.match(gone.messages[1].content[0].text, /\[plan-guard: file unreadable: /)
+  assert.equal(onlyFile(fake).seenVersion, 'missing')
+
+  const again = await preStep(fake, { turn: 3 })
+  assert.equal(again.messages.length, 1, 'a still-missing file is noticed once')
+
+  fake.ctx.fs.writeFile('/repo/src/a.ts', { version: 'v5', size: 19, text: 'export const a = 1' })
+  const back = await preStep(fake, { turn: 4 })
+  assert.match(back.messages[1].content[0].text, /export const a = 1/, 'the file coming back is a change again')
+})
+
+test('a changed file shows up in the tool list before its delivery', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'src/a.ts')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+
+  // Journal the change the way the injector does, then read the drawer state.
+  const item = onlyFile(fake)
+  await fake.provided.get(SERVICE_KEY).setMounted(SESSION_ID, item.id, false)
+  await fake.provided.get(SERVICE_KEY).setMounted(SESSION_ID, item.id, true)
+  const state = await fake.provided.get(SERVICE_KEY).list(SESSION_ID)
+  assert.equal(state.items.find(entry => entry.id === item.id).changedPending, false)
+  const listed = await fake.tool().execute({ action: 'list' }, execFor(fake, 'call-list2'))
+  assert.match(listed.text, /mounted/)
+})
+
+test('refreshChangedFiles off skips the probe entirely', async () => {
+  const fake = await setup({ refreshChangedFiles: false })
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'src/a.ts')
+  const first = await preStep(fake)
+  surfaceVisible(fake, first.messages[1])
+  assert.equal(onlyFile(fake).seenVersion, undefined, 'nothing is stamped while the probe is off')
+
+  const stats = fake.ctx.fs.counts.stat
+  fake.ctx.fs.writeFile('/repo/src/a.ts', { version: 'v9', size: 25, text: 'export const a = 42 // edited' })
+  const next = await preStep(fake, { turn: 2 })
+  assert.equal(next.messages.length, 1, 'a changed file is not reported')
+  assert.equal(fake.ctx.fs.counts.stat, stats, 'and no stat happens')
+})
+
+test('an unapproved plan is never injected, folded from real session events', async () => {
+  const fake = await setup()
+  const callId = 'call_3b263a046fc3435ebfecca87'
+  const events = [
+    { type: 'plan/mode', data: { active: true } },
+    {
+      type: 'tool/call',
+      data: {
+        turn: 1, step: 127, callId, name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: '# 计划：未获批准\nsecret body' }),
+      },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 127,
+        message: {
+          role: 'tool',
+          source: { kind: 'tool', callId },
+          toolCallId: callId,
+          content: [{ type: 'text', text: 'The user dismissed the plan review to reply in their own words; plan mode remains active.' }],
+          isError: false,
+        },
+      },
+    },
+    { type: 'step/end', data: { turn: 1, step: 127 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'compaction/end', data: {} },
+  ]
+  const folded = events.reduce((state, event) => t.foldDocs(state, event), t.stateInit())
+  assert.equal(folded.docs[0].accepted, false)
+  fake.setProjection(folded)
+
+  const quiet = await preStep(fake)
+  assert.equal(quiet.messages.length, 1, 'a dismissed plan reaches the model as nothing at all')
+
+  // Approving a later plan mounts that one, and only that one.
+  const approvedId = 'call_22fad1704c5945beb92f3698'
+  const more = [
+    {
+      type: 'tool/call',
+      data: {
+        turn: 2, step: 6, callId: approvedId, name: 'exit_plan_mode',
+        arguments: JSON.stringify({ plan: '# 计划：已批准\napproved body' }),
+      },
+    },
+    {
+      type: 'tool/result',
+      data: {
+        turn: 2,
+        step: 6,
+        message: {
+          role: 'tool',
+          toolCallId: approvedId,
+          content: [{ type: 'text', text: 'Plan approved — plan mode exited; carry out the plan starting with your next step.' }],
+          isError: false,
+        },
+      },
+    },
+    { type: 'plan/mode', data: { active: false } },
+  ]
+  const settled = more.reduce((state, event) => t.foldDocs(state, event), folded)
+  assert.equal(settled.docs[1].accepted, true)
+  assert.equal(settled.docs[0].accepted, false)
+  fake.setProjection(settled)
+
+  const injected = await preStep(fake, { turn: 3 })
+  assert.equal(injected.messages.length, 2)
+  assert.match(injected.messages[1].content[0].text, /## Plan: 计划：已批准/)
+  assert.match(injected.messages[1].content[0].text, /approved body/)
+  assert.ok(!injected.messages[1].content[0].text.includes('secret body'), 'the dismissed plan stays out')
 })

@@ -448,3 +448,47 @@ test('item metadata uses bytes for files and chars for notes', async () => {
   assert.deepEqual(metaOf(file), ['File · Mounted · human · 1234 bytes'])
   assert.deepEqual(metaOf(note), ['Note · Mounted · human · 42 chars'])
 })
+
+test('rows label an unconfirmed verdict and a file awaiting its refresh', async () => {
+  const seeded = await loadClientModule()
+  const t = key => ({
+    'plans.auto': 'Auto',
+    'plans.awaiting': 'Auto after first compaction',
+    'plans.notAuto': 'Not auto-mounted',
+    'plans.explicitMounted': 'Mounted by you',
+    'plans.explicitUnmounted': 'Unmounted by you',
+    'plans.rejected': 'Rejected',
+    'plans.unconfirmed': 'Verdict unconfirmed',
+    'plans.size': '{chars} chars',
+    'items.meta': '{kind} · {state} · {by} · {size}',
+    'items.kindFile': 'File',
+    'items.mounted': 'Mounted',
+    'items.bytes': '{size} bytes',
+    'items.addedByHuman': 'human',
+    'items.changed': 'Changed on disk',
+  })[key] ?? key
+  const { PlanRow, ItemRow } = seeded.module.__testables
+  const planRow = (accepted) => flatElements(PlanRow({
+    plan: {
+      callId: 'c1', title: 'P', mounted: false, explicit: null, auto: false,
+      awaitingCompaction: false, accepted, autoEligible: false, size: 10, turn: 2,
+    },
+    t, busy: false, expanded: false, preview: undefined, titleRef: undefined,
+    onToggle() {}, onAuto() {}, onExpand() {},
+  })).find(node => node.props?.className === 'pg-meta')?.children
+  assert.deepEqual(planRow(null), ['Not auto-mounted · Verdict unconfirmed · 10 chars · turn 2'])
+  assert.deepEqual(planRow(false), ['Not auto-mounted · Rejected · 10 chars · turn 2'])
+  assert.deepEqual(planRow(true), ['Not auto-mounted · 10 chars · turn 2'])
+
+  const itemRow = (changedPending) => flatElements(ItemRow({
+    item: {
+      kind: 'file', id: 'file:1', title: 'a.ts', path: 'src/a.ts', size: 19,
+      mounted: true, locked: false, createdBy: 'human', changedPending,
+    },
+    t, busy: false, expanded: false, preview: undefined, titleRef: () => {}, deleteConfirm: false,
+    onToggle: () => {}, onLock: () => {}, onDelete: () => {}, onConfirmDelete: () => {},
+    onCancelDelete: () => {}, onExpand: () => {}, onOpenViewer: () => {},
+  })).find(node => node.props?.className === 'pg-meta')?.children
+  assert.match(String(itemRow(true)), /Changed on disk/)
+  assert.ok(!String(itemRow(false)).includes('Changed on disk'))
+})

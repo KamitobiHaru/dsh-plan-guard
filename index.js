@@ -4,8 +4,12 @@
  *
  * A plan document is one `exit_plan_mode` submission keyed by its tool call
  * id, derived from logged session events; each document also records whether
- * its submission was accepted or dismissed (folded from its `tool/result`).
- * Notes and files are items stored in the plugin's storage domain. The full
+ * its submission was accepted or dismissed. Only a document with a confirmed
+ * accepted verdict auto-mounts, so an unapproved plan never reaches the model
+ * as a constraint (a human can still mount one explicitly).
+ * Notes and files are items stored in the plugin's storage domain. Mounted
+ * files carry a sighting of the exact bytes the model last saw, so an
+ * on-disk edit is noticed on the next step and re-injected in full. The full
  * guarded set enters the model surface through one `agent/pre-step` message
  * splice, which the agent loop logs as a durable `user/message` event, only
  * when no guarded message is visible; afterwards only changes arrive.
@@ -16,7 +20,7 @@
  * @module dsh-plan-guard
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { basename, isAbsolute, relative } from 'node:path'
 
 /** Cordis plugin name. */
@@ -67,6 +71,8 @@ const DEFAULT_CONFIG = {
   defaultPolicy: 'ask',
   /** Auto-mount the newest plan once the Session has compacted. */
   autoMountLatestPlan: true,
+  /** Probe mounted files each step and re-inject one whose content changed on disk. */
+  refreshChangedFiles: true,
   /** Foreground permission-question timeout in milliseconds. */
   askTimeoutMs: 120000,
   /** Allow file items whose absolute path is outside the Session workspace. */
@@ -85,21 +91,26 @@ const CONFIG_FIELD_LIMITS = {
   previewChars: [500, 20000],
 }
 
-const CONFIG_BOOLEAN_FIELDS = ['disabled', 'toolEnabled', 'autoMountLatestPlan', 'allowOutsideWorkspace']
+const CONFIG_BOOLEAN_FIELDS = ['disabled', 'toolEnabled', 'autoMountLatestPlan', 'allowOutsideWorkspace', 'refreshChangedFiles']
 
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0
 /** Own-record item lookup; never walks Object.prototype for a hostile id. */
 const ownItem = (record, id) => (Object.hasOwn(record.items, id) ? record.items[id] : undefined)
 /** Empty change journal for the guarded set. */
-const emptyPending = () => ({ added: {}, removed: {} })
-/** Shallow copy of the journal's two buckets. */
+const emptyPending = () => ({ added: {}, changed: {}, removed: {} })
+/** Shallow copy of the journal's buckets. */
 const clonePending = (pending) => ({
   added: { ...(pending?.added ?? {}) },
+  changed: { ...(pending?.changed ?? {}) },
   removed: { ...(pending?.removed ?? {}) },
 })
 /** Kinds a pending change can name; anything else is dropped on read. */
 const PENDING_KINDS = new Set(['plan', 'file', 'note'])
+/** Journal buckets, in the order they are trimmed. */
+const PENDING_BUCKETS = ['added', 'changed', 'removed']
+/** Events that end any claim that a later `plan/mode` off was caused by one plan. */
+const VERDICT_VOIDING_EVENTS = new Set(['tool/call', 'tool/ptc-dispatch-start', 'user/message', 'command/run'])
 /** Bound on the journal so a long offline gap cannot grow the record. */
 const PENDING_LIMIT = 200
 
@@ -115,19 +126,27 @@ const cloneRecord = (record) => ({
 /**
  * Record one change in the pending journal, coalescing by key: the newest
  * action wins, so add-then-remove leaves nothing to report and a removal that
- * is immediately undone never reaches the model.
+ * is immediately undone never reaches the model. `changed` reports an on-disk
+ * rewrite of a mounted file; while an item's addition is still undelivered the
+ * addition already carries current bytes, so the change needs no second entry.
  * @param pending - current journal, possibly missing on a legacy record.
- * @param change - `{ action: 'added'|'removed', key, kind, id, label }`.
+ * @param change - `{ action: 'added'|'changed'|'removed', key, kind, id, label }`.
  * @returns a new journal, capped at `PENDING_LIMIT` entries.
  */
 export function applyPending(pending, change) {
   const next = clonePending(pending)
   const entry = { kind: change.kind, id: change.id, label: String(change.label).slice(0, 200) }
   if (change.action === 'added') {
+    delete next.changed[change.key]
     delete next.removed[change.key]
     next.added[change.key] = entry
+  } else if (change.action === 'changed') {
+    if (next.added[change.key] !== undefined) return next
+    delete next.removed[change.key]
+    next.changed[change.key] = entry
   } else {
     delete next.added[change.key]
+    delete next.changed[change.key]
     next.removed[change.key] = entry
   }
   return trimPending(next)
@@ -135,10 +154,10 @@ export function applyPending(pending, change) {
 
 /** Drop the oldest journal entries once the cap is exceeded. */
 function trimPending(pending) {
-  let total = Object.keys(pending.added).length + Object.keys(pending.removed).length
+  let total = PENDING_BUCKETS.reduce((sum, bucket) => sum + Object.keys(pending[bucket]).length, 0)
   while (total > PENDING_LIMIT) {
-    const bucket = Object.keys(pending.added).length > 0 ? pending.added : pending.removed
-    const oldest = Object.keys(bucket)[0]
+    const bucket = PENDING_BUCKETS.map(name => pending[name]).find(entries => Object.keys(entries).length > 0)
+    const oldest = bucket === undefined ? undefined : Object.keys(bucket)[0]
     if (oldest === undefined) break
     delete bucket[oldest]
     total -= 1
@@ -211,9 +230,11 @@ export const Config = {
  * Per-session projected state. Plain JSON by the projection contract: each doc
  * carries the bounded full markdown so both the drawer and the injector read it
  * without re-scanning the log; `sawCompaction` records that this session had at
- * least one successful compaction, the point where guarding starts to matter.
+ * least one successful compaction, the point where guarding starts to matter;
+ * `awaitingVerdict` holds the call id of one plan whose logged outcome carried no
+ * readable verdict, so a following `plan/mode` off can still settle it.
  */
-const stateInit = () => ({ docs: [], sawCompaction: false })
+const stateInit = () => ({ docs: [], sawCompaction: false, awaitingVerdict: null })
 
 /** Validates prior state before it seeds a fold from a persisted cache row. */
 const stateSchema = {
@@ -228,7 +249,11 @@ const stateSchema = {
         throw new Error('plan-guard projection document does not match its shape')
       }
     }
-    return value
+    if (value.awaitingVerdict !== undefined && value.awaitingVerdict !== null
+      && typeof value.awaitingVerdict !== 'string') {
+      throw new Error('plan-guard pending verdict id does not match its shape')
+    }
+    return { ...value, awaitingVerdict: isNonEmptyString(value.awaitingVerdict) ? value.awaitingVerdict : null }
   },
 }
 
@@ -266,6 +291,75 @@ function planFromPtcDispatchStart(data) {
 }
 
 /**
+ * The call id one logged outcome belongs to. `tool/result` carries it inside
+ * `data.message` in the v4 session log (flat on `data` in older logs); a PTC
+ * sub-dispatch outcome carries it as `data.subCallId`, which is exactly the key
+ * `planFromPtcDispatchStart` recorded the document under.
+ */
+function outcomeCallId(eventType, data) {
+  if (!isRecord(data)) return undefined
+  if (eventType === 'tool/ptc-dispatch') {
+    return isNonEmptyString(data.subCallId) ? data.subCallId : undefined
+  }
+  const message = isRecord(data.message) ? data.message : undefined
+  if (message !== undefined && isNonEmptyString(message.toolCallId)) return message.toolCallId
+  return isNonEmptyString(data.toolCallId) ? data.toolCallId : undefined
+}
+
+/** Concatenated model-facing text of one logged outcome, or ''. */
+function outcomeText(source) {
+  const content = isRecord(source) ? source.content : undefined
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter(block => isRecord(block) && block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+}
+
+/**
+ * Verdict on one plan submission, read from its logged outcome.
+ *
+ * `exit_plan_mode` answers in both directions as a plain success — the approval
+ * and the dismissal differ only in the rendered text (`dsh-plan-mode` renders
+ * `{ approved }` into one text block) — so `isError` alone is never enough, and
+ * a dismissed plan used to fold as if it had been approved. Keyword matching on
+ * the text is primary, `isError` covers a hard failure and the pre-rc logs that
+ * recorded a dismissal as an error. When neither signal is readable the verdict
+ * stays unknown, which the auto-mount rule treats as not approved.
+ *
+ * @param data - the `tool/result` or `tool/ptc-dispatch` event data.
+ * @returns `true` (approved), `false` (dismissed), or `undefined` (unknown).
+ */
+export function planVerdict(data) {
+  if (!isRecord(data)) return undefined
+  const message = isRecord(data.message) ? data.message : data
+  if (message.isError === true || data.isError === true) return false
+  const text = outcomeText(message) === '' ? outcomeText(data) : outcomeText(message)
+  if (text === '') return undefined
+  if (/dismissed/i.test(text)) return false
+  if (/plan approved/i.test(text)) return true
+  return undefined
+}
+
+/**
+ * Settle one document's verdict and stop awaiting it, returning the same state
+ * reference when neither moves. `accepted === undefined` leaves the stored
+ * verdict untouched so an unreadable outcome never rewrites a known answer.
+ */
+function settleVerdict(state, callId, accepted) {
+  const index = state.docs.findIndex(doc => doc.callId === callId)
+  if (index < 0) return state
+  const doc = state.docs[index]
+  const awaiting = state.awaitingVerdict === callId ? null : state.awaitingVerdict
+  if (accepted === undefined || accepted === doc.accepted) {
+    return awaiting === state.awaitingVerdict ? state : { ...state, awaitingVerdict: awaiting }
+  }
+  const docs = state.docs.slice()
+  docs[index] = { ...doc, accepted }
+  return { ...state, docs, awaitingVerdict: awaiting }
+}
+
+/**
  * Pure synchronous fold (projection contract): return the same reference when
  * the event is not this unit's, and never mutate the incoming state.
  */
@@ -274,35 +368,37 @@ export function foldDocs(state, event) {
   if (event.type === 'compaction/end' && event.data?.error === undefined) {
     return state.sawCompaction === true ? state : { ...state, sawCompaction: true }
   }
-  // The verdict on one plan submission: a dismissed plan stays listed but can
-  // never auto-mount. `tool/result` always follows its `tool/call` in the log,
-  // so the document is already in `docs` when this arrives; a result naming an
-  // unknown call id (or none at all) is not this unit's.
-  // The v4 session log nests the outcome under `data.message`
-  // (`{turn, step, message: {toolCallId, content, isError, …}}`); older logs
-  // carry `toolCallId`/`isError` flat on `data`, which still works as fallback.
-  if (event.type === 'tool/result') {
-    const data = isRecord(event.data) ? event.data : undefined
-    const message = data !== undefined && isRecord(data.message) ? data.message : undefined
-    const callId = message !== undefined && typeof message.toolCallId === 'string'
-      ? message.toolCallId
-      : data !== undefined && typeof data.toolCallId === 'string' ? data.toolCallId : undefined
-    if (callId === undefined) return state
-    const index = state.docs.findIndex(doc => doc.callId === callId)
-    if (index < 0) return state
-    const isError = message !== undefined && message.isError !== undefined ? message.isError : data?.isError
-    const accepted = isError === true ? false : true
-    if (state.docs[index].accepted === accepted) return state
-    const docs = state.docs.slice()
-    docs[index] = { ...docs[index], accepted }
-    return { ...state, docs }
+  // Once anything else happens in the Session, a later `plan/mode` off can no
+  // longer be attributed to the plan awaiting its verdict.
+  let base = state
+  if (base.awaitingVerdict !== null && VERDICT_VOIDING_EVENTS.has(event.type)) {
+    base = { ...base, awaitingVerdict: null }
+  }
+  // Leaving plan mode is the structural mark of an approval. It is appended from
+  // the next accepted pre-step, so it always lands after the approving result.
+  if (event.type === 'plan/mode') {
+    if (event.data?.active !== false || base.awaitingVerdict === null) return base
+    return settleVerdict(base, base.awaitingVerdict, true)
+  }
+  // The verdict on one plan submission, from a native `tool/result` or a PTC
+  // `tool/ptc-dispatch`. A result naming an unknown call id (or none at all) is
+  // not this unit's; a readable-free outcome starts awaiting structural proof.
+  if (event.type === 'tool/result' || event.type === 'tool/ptc-dispatch') {
+    const callId = outcomeCallId(event.type, event.data)
+    if (callId === undefined) return base
+    const index = base.docs.findIndex(doc => doc.callId === callId)
+    if (index < 0) return base
+    const accepted = planVerdict(event.data)
+    if (accepted !== undefined) return settleVerdict(base, callId, accepted)
+    if (base.docs[index].accepted !== undefined || base.awaitingVerdict !== null) return base
+    return { ...base, awaitingVerdict: callId }
   }
   const plan = event.type === 'tool/call'
     ? planFromNativeCall(event.data)
     : event.type === 'tool/ptc-dispatch-start' ? planFromPtcDispatchStart(event.data) : undefined
-  if (plan === undefined) return state
-  if (state.docs.some(doc => doc.callId === plan.callId)) return state
-  return { ...state, docs: [...state.docs, plan] }
+  if (plan === undefined) return base
+  if (base.docs.some(doc => doc.callId === plan.callId)) return base
+  return { ...base, docs: [...base.docs, plan] }
 }
 
 // #endregion
@@ -368,6 +464,13 @@ function normalizeItemStrict(id, raw) {
   for (const field of ['path', 'displayPath', 'workspaceRoot']) {
     if (!isNonEmptyString(raw[field])) throw new Error(`guarded file ${id} has no ${field}`)
   }
+  // Sighting of the exact bytes the model last saw, written by the injector.
+  // Optional and lenient: an unstamped item is simply probed once more. These
+  // fields must be re-emitted here or the storage schema drops them on read.
+  const sight = {}
+  if (isNonEmptyString(raw.seenVersion)) sight.seenVersion = raw.seenVersion
+  if (isNonEmptyString(raw.seenDigest)) sight.seenDigest = raw.seenDigest
+  if (typeof raw.seenAt === 'number' && Number.isFinite(raw.seenAt)) sight.seenAt = raw.seenAt
   return {
     id,
     kind,
@@ -380,6 +483,7 @@ function normalizeItemStrict(id, raw) {
     locked: raw.locked,
     createdBy: raw.createdBy,
     createdAt: raw.createdAt,
+    ...sight,
   }
 }
 
@@ -387,7 +491,7 @@ function normalizeItemStrict(id, raw) {
 function normalizePending(raw) {
   const pending = emptyPending()
   if (!isRecord(raw)) return pending
-  for (const bucket of ['added', 'removed']) {
+  for (const bucket of PENDING_BUCKETS) {
     const source = raw[bucket]
     if (!isRecord(source)) continue
     for (const [key, entry] of Object.entries(source)) {
@@ -479,13 +583,14 @@ function readRecord(domain, config, sessionId) {
  * Effective mount state for one plan document.
  * An explicit human choice wins; otherwise the newest plan auto-mounts only
  * after the first successful compaction (when `autoMountLatestPlan` is on)
- * and only when it was not dismissed (`accepted === false` never auto-mounts;
- * an unknown verdict keeps the previous behaviour).
+ * and only when its approval is confirmed. The rule is deliberately
+ * fail-closed: a dismissed plan and a plan whose verdict could not be read
+ * from the log both stay unmounted, and a human can still mount either one.
  */
 export function effectivePlanState(doc, index, docs, record, config, sawCompaction) {
   const explicit = record.plans[doc.callId]
   const isLatest = index === docs.length - 1
-  const autoEligible = isLatest && config.autoMountLatestPlan === true && doc.accepted !== false
+  const autoEligible = isLatest && config.autoMountLatestPlan === true && doc.accepted === true
   if (explicit === 'mounted' || explicit === 'unmounted') {
     return {
       mounted: explicit === 'mounted',
@@ -666,12 +771,28 @@ function planSectionText(doc, config) {
 
 /** One note or file as an injected section, with its unreadable/truncated markers. */
 function itemSectionText(item, config, contents) {
-  if (item.kind === 'note') {
-    const body = item.text.length > config.maxCharsPerNote
-      ? `${item.text.slice(0, config.maxCharsPerNote)}\n[plan-guard: note truncated at ${config.maxCharsPerNote} characters]`
-      : item.text
-    return `## Note: ${item.title}\nitem: ${item.id}\n\n${body}`
-  }
+  return item.kind === 'note' ? noteSectionText(item, config) : fileSectionText(item, config, contents, false)
+}
+
+/** One note as an injected section. */
+function noteSectionText(item, config) {
+  const body = item.text.length > config.maxCharsPerNote
+    ? `${item.text.slice(0, config.maxCharsPerNote)}\n[plan-guard: note truncated at ${config.maxCharsPerNote} characters]`
+    : item.text
+  return `## Note: ${item.title}\nitem: ${item.id}\n\n${body}`
+}
+
+/**
+ * One file as an injected section. A refreshed file is labelled `(changed)` so
+ * the model reads it as replacing the older copy still sitting in the surface.
+ */
+function fileSectionText(item, config, contents, changed) {
+  const heading = changed === true ? `## File: ${item.displayPath} (changed)` : `## File: ${item.displayPath}`
+  return `${heading}\nitem: ${item.id}\n\n${itemBodyText(item, config, contents)}`
+}
+
+/** The bounded body of one file item, with its unreadable/truncated markers. */
+function itemBodyText(item, config, contents) {
   const content = contents?.[item.id]
   let body
   if (content === undefined) {
@@ -682,7 +803,7 @@ function itemSectionText(item, config, contents) {
     body = content.text ?? ''
     if (content.truncated === true) body += `\n[plan-guard: file truncated at ${config.maxCharsPerFile} characters]`
   }
-  return `## File: ${item.displayPath}\nitem: ${item.id}\n\n${body}`
+  return body
 }
 
 /**
@@ -702,7 +823,7 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
   const omitted = []
   const included = []
   const header = `${config.header}\n`
-    + 'This block is background context, not a new request. You see the full set only the first time anything is guarded, or again after a compaction wiped it from the surface; afterwards you only get short updates when the guarded set changes (new content in full, removals as one-line notices).\n\n'
+    + 'This block is background context, not a new request. You see the full set only the first time anything is guarded, or again after a compaction wiped it from the surface; afterwards you only get short updates when the guarded set changes (new content in full, removals as one-line notices, and a mounted file that changed on disk re-sent in full under a "(changed)" heading, which replaces the older copy above it).\n\n'
   const footer = config.toolEnabled === false
     ? '\n\nPlans and pinned items are managed by the user in the Guarded context drawer.\n'
     : '\n\nUse the `context_guard` tool to list, mount, unmount, or add notes/files. Plans are user-controlled.\n'
@@ -740,9 +861,10 @@ function removalNoun(entry) {
 
 /**
  * Compose the incremental message for changes since the last delivery: one
- * sentence per removal, then the added content in the same section format the
- * snapshot uses. Append-only by design, so the request prefix stays cached.
- * @returns `{ text, added, removed }`, or undefined when nothing is worth sending.
+ * sentence per removal, one per refreshed file, then the content of what was
+ * added or refreshed in the same section format the snapshot uses. Append-only
+ * by design, so the request prefix stays cached.
+ * @returns `{ text, added, changed, removed }`, or undefined when nothing is worth sending.
  */
 export function composeUpdate({ pending, record, docs, config, sawCompaction, contents }) {
   const planIndex = new Map(docs.map((doc, index) => [doc.callId, { doc, index }]))
@@ -765,19 +887,35 @@ export function composeUpdate({ pending, record, docs, config, sawCompaction, co
     if (entry.kind === 'plan') addedPlanIds.add(entry.id)
     else addedItemIds.add(entry.id)
   }
+  // Refreshed files: still-mounted file items whose bytes moved since the model
+  // last saw them. A removal or addition already in the journal covers them.
+  const changedIds = new Set()
+  for (const entry of Object.values(pending?.changed ?? {})) {
+    if (entry.kind !== 'file') continue
+    if (addedItemIds.has(entry.id)) continue
+    const item = ownItem(record, entry.id)
+    if (item === undefined || item.mounted !== true || item.kind !== 'file') continue
+    changedIds.add(entry.id)
+  }
+  const byAge = (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
   const addedItems = Object.values(record.items)
     .filter(item => addedItemIds.has(item.id) && item.mounted === true)
-    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+    .sort(byAge)
+  const changedItems = Object.values(record.items)
+    .filter(item => changedIds.has(item.id))
+    .sort(byAge)
   const addedPlans = docs.filter(doc => addedPlanIds.has(doc.callId)).reverse()
-  if (removedLines.length === 0 && addedPlans.length === 0 && addedItems.length === 0) return undefined
+  const changedLines = changedItems.map(item => `File ${item.displayPath} (${item.id}) changed on disk; the section below is its current content.`)
+  if (removedLines.length === 0 && changedLines.length === 0 && addedPlans.length === 0 && addedItems.length === 0) return undefined
 
-  const removedText = removedLines.length === 0 ? '' : `${removedLines.join(' ')}\n\n`
-  const prefix = `${config.header} — update\nBackground context, not a new request.\n\n${removedText}`
+  const noticeLines = [...removedLines, ...changedLines]
+  const prefix = `${config.header} — update\nBackground context, not a new request.\n\n${noticeLines.length === 0 ? '' : `${noticeLines.join(' ')}\n\n`}`
   let used = prefix.length
   const sections = []
   const omitted = []
   const included = []
-  const push = (id, section) => {
+  const changedIncluded = []
+  const push = (id, section, changed) => {
     if (used + section.length + 2 > config.maxTotalChars) {
       omitted.push(id)
       return
@@ -785,15 +923,19 @@ export function composeUpdate({ pending, record, docs, config, sawCompaction, co
     used += section.length + 2
     sections.push(section)
     included.push(id)
+    if (changed === true) changedIncluded.push(id)
   }
-  for (const doc of addedPlans) push(doc.callId, planSectionText(doc, config))
-  for (const item of addedItems) push(item.id, itemSectionText(item, config, contents))
+  for (const doc of addedPlans) push(doc.callId, planSectionText(doc, config), false)
+  for (const item of addedItems) push(item.id, itemSectionText(item, config, contents), false)
+  for (const item of changedItems) push(item.id, fileSectionText(item, config, contents, true), true)
   const omittedLine = omitted.length === 0
     ? ''
     : `\n[plan-guard: omitted over the total cap: ${omitted.join(', ')}]`
   return {
     text: prefix + sections.join('\n\n') + omittedLine,
-    added: included,
+    added: included.filter(id => !changedIncluded.includes(id)),
+    changed: changedIncluded,
+    omitted,
     removed: removedLines,
   }
 }
@@ -899,6 +1041,9 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
         locked: item.locked,
         createdBy: item.createdBy,
         createdAt: item.createdAt,
+        // Read straight from the journal: a detected change awaiting its next
+        // delivery, with no extra filesystem probe per drawer poll.
+        changedPending: Object.hasOwn(record.pending?.changed ?? {}, item.id),
       }))
     return {
       live: true,
@@ -1011,15 +1156,138 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
     }
   }
 
-  const readFileContents = async (items, signal) => {
+  const readFileContents = async (items, signal, cache) => {
     const contents = {}
     for (const item of items) {
       if (item.kind !== 'file' || item.mounted !== true) continue
+      if (cache !== undefined && cache[item.id] !== undefined) {
+        contents[item.id] = cache[item.id]
+        continue
+      }
       signal?.throwIfAborted?.()
       contents[item.id] = await readStoredFile(item, signal)
     }
     return contents
   }
+
+  /** sha256 prefix of the exact body the model is shown; cheap and restart-stable. */
+  const digestBody = (text) => createHash('sha256').update(text).digest('hex').slice(0, 16)
+  /** Stand-in sighting for a file that was missing or unreadable when last seen. */
+  const MISSING_SIGHT = 'missing'
+
+  /**
+   * Find out which mounted files moved on disk since the model last saw them.
+   * Cheap by construction: one `stat` per item (version = `dev:ino:size:mtime:ctime`),
+   * and a content read only once that version moved, so a `touch` or a rewrite
+   * with identical bytes never reaches the model.
+   *
+   * An item with no sighting yet (recorded by an older version, or just added)
+   * is compared against the byte size stored when it was added: a size match
+   * silently records the sighting without injecting anything, because the model
+   * has not been shown a stale copy this step could improve on.
+   *
+   * @returns `{ changed, contents, sights, versions }` — ids whose body must be
+   *   re-sent, the bodies already read, sightings for items needing only a quiet
+   *   restamp, and the metadata seen for every probed item.
+   */
+  const observeFileChanges = async (items, signal) => {
+    const result = { changed: [], contents: {}, sights: {}, versions: {} }
+    if (config.refreshChangedFiles !== true) return result
+    const fs = ctx.get('fs')
+    if (fs === undefined) return result
+    const files = items.filter(item => item.kind === 'file' && item.mounted === true)
+    if (files.length === 0) return result
+    for (const item of files) {
+      signal?.throwIfAborted?.()
+      let info
+      try {
+        info = await fs.stat(await fs.resolve(item.path, { signal }), signal)
+      } catch (error) {
+        if (signal?.aborted === true) throw error
+        info = undefined
+      }
+      const present = info !== undefined && info.type === 'file'
+      const seen = present && isNonEmptyString(info.version) ? String(info.version) : MISSING_SIGHT
+      const size = present && typeof info.size === 'number' ? info.size : item.size
+      result.versions[item.id] = { seenVersion: seen, size }
+      if (seen === item.seenVersion) continue
+      if (!isNonEmptyString(item.seenVersion) && present && size === item.size) {
+        result.sights[item.id] = { seenVersion: seen, seenDigest: item.seenDigest ?? '', size }
+        continue
+      }
+      const read = await readStoredFile(item, signal)
+      const digest = read.error === undefined ? digestBody(read.text ?? '') : ''
+      if (present && digest !== '' && digest === item.seenDigest) {
+        result.sights[item.id] = { seenVersion: seen, seenDigest: digest, size }
+        continue
+      }
+      result.changed.push(item.id)
+      result.contents[item.id] = read
+      result.sights[item.id] = { seenVersion: seen, seenDigest: digest, size }
+    }
+    return result
+  }
+
+  /**
+   * Build sightings for the file bodies one message actually carried. The digest
+   * covers exactly what was injected (bounded by `maxCharsPerFile`), so a later
+   * change beyond that cap cannot make the update loop forever, and an item the
+   * total cap dropped still counts as delivered: the message named the omission.
+   * @param items - items whose content the message included.
+   * @param contents - the bodies that were composed into the message.
+   * @param versions - the metadata `observeFileChanges` probed this step.
+   */
+  const sightsFor = (items, contents, versions) => {
+    const sights = {}
+    for (const item of items) {
+      if (item.kind !== 'file') continue
+      const meta = versions?.[item.id]
+      const content = contents?.[item.id]
+      if (meta === undefined || content === undefined) continue
+      sights[item.id] = {
+        seenVersion: meta.seenVersion,
+        seenDigest: content.error === undefined ? digestBody(content.text ?? '') : '',
+        size: meta.size,
+      }
+    }
+    return sights
+  }
+
+  /**
+   * Account for one delivered injection: drop the journal keys it covered and
+   * store the file sightings it carried, in a single write. Stamping only here
+   * means a step that never sent a message leaves the change pending, and a file
+   * the total cap could not fit is still stamped (the message names the omission)
+   * instead of re-firing on every following step.
+   * @param sessionId - target Session.
+   * @param keys - journal keys the injected message accounted for.
+   * @param sights - `{ itemId: { seenVersion, seenDigest, size } }`.
+   */
+  const deliver = (sessionId, keys, sights) => mutate(sessionId, (current) => {
+    const pending = clonePending(current.pending)
+    let touched = false
+    for (const key of new Set(keys ?? [])) {
+      for (const bucket of PENDING_BUCKETS) {
+        if (pending[bucket][key] !== undefined) {
+          delete pending[bucket][key]
+          touched = true
+        }
+      }
+    }
+    const items = { ...current.items }
+    for (const [id, sight] of Object.entries(sights ?? {})) {
+      const item = items[id]
+      if (item === undefined || item.kind !== 'file') continue
+      if (item.seenVersion === sight.seenVersion && item.seenDigest === sight.seenDigest && item.size === sight.size) continue
+      items[id] = { ...item, ...sight }
+      touched = true
+    }
+    if (!touched) return undefined
+    const next = cloneRecord(current)
+    next.pending = pending
+    next.items = items
+    return next
+  })
 
   const addFile = async (sessionId, prepared, actor, approved) => {
     requireLive(sessionId)
@@ -1174,37 +1442,7 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
   }
 
   /**
-   * Drop journal entries the injector just delivered. Keys are removed
-   * individually, so a change arriving between the read and this write survives
-   * to the next step.
-   * @param sessionId - target Session.
-   * @param keys - journal keys the injected message accounted for.
-   */
-  const markInjected = (sessionId, keys) => {
-    const unique = [...new Set(keys)]
-    if (unique.length === 0) return Promise.resolve({ record: undefined, changed: false })
-    return mutate(sessionId, (current) => {
-      const pending = clonePending(current.pending)
-      let touched = false
-      for (const key of unique) {
-        if (Object.hasOwn(pending.added, key)) {
-          delete pending.added[key]
-          touched = true
-        }
-        if (Object.hasOwn(pending.removed, key)) {
-          delete pending.removed[key]
-          touched = true
-        }
-      }
-      if (!touched) return undefined
-      const next = cloneRecord(current)
-      next.pending = pending
-      return next
-    })
-  }
-
-  /**
-   * Internal bookkeeping, deliberately permission-free (like markInjected):
+   * Internal bookkeeping, deliberately permission-free (like `deliver`):
    * the auto-mount rule itself never asks, so accounting for its transitions
    * must not ask either. Journals the new auto plan's addition (full text next
    * step) and the displaced auto plan's removal (one line); explicit human
@@ -1229,7 +1467,9 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
     config,
     read,
     state,
-    markInjected,
+    deliver,
+    observeFileChanges,
+    sightsFor,
     syncAutoPlans,
     setPolicy,
     setPlan,
@@ -1331,6 +1571,7 @@ async function askPermission(ctx, exec, config, action, target) {
 function renderItemLine(item) {
   const flags = [item.mounted ? 'mounted' : 'unmounted']
   if (item.locked) flags.push('locked')
+  if (item.changedPending === true) flags.push('changed on disk; its current content is sent on the next step')
   flags.push(`added by ${item.createdBy}`)
   const path = item.kind === 'file' && item.path !== null ? ` | ${item.path}` : ''
   return `- ${item.id} | ${item.kind} | ${item.title}${path} | ${flags.join(', ')}`
@@ -1348,6 +1589,7 @@ function renderListText(state) {
     const flags = [plan.mounted ? 'mounted' : 'unmounted']
     if (plan.auto) flags.push('auto')
     if (plan.accepted === false) flags.push('rejected; never auto-mounts')
+    else if (plan.accepted !== true) flags.push('verdict unconfirmed; never auto-mounts')
     else if (plan.awaitingCompaction) flags.push('will auto-mount after the first compaction')
     if (plan.explicit !== null) flags.push(`explicit ${plan.explicit}`)
     lines.push(`- ${plan.callId} | ${plan.title} | ${flags.join(', ')}`)
@@ -1372,7 +1614,7 @@ function toolPreviewText(item, prepared) {
 function createTool(ctx, operations, config) {
   return {
     name: TOOL_NAME,
-    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they stay in your context across steps and compactions. Plans are user-controlled; this tool cannot mount or unmount them. Rejected plans stay listed but never auto-mount. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the full set is re-sent only when the surface holds no guarded message (first guarding, or after a compaction); otherwise only changes arrive; an unmount adds one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them. When you hold facts, decisions, or work-in-progress that must survive for the rest of this session, persist them with `add_note`/`add_file` so they stay in your context.',
+    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they stay in your context across steps and compactions. Plans are user-controlled; this tool cannot mount or unmount them. Only a plan the user explicitly approved can auto-mount, and only after the first compaction; a rejected or unconfirmed plan stays listed but never auto-mounts. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the full set is re-sent only when the surface holds no guarded message (first guarding, or after a compaction); otherwise only changes arrive: new content in full, a mounted file whose bytes changed on disk re-sent in full under a "(changed)" heading, and an unmount as one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them. When you hold facts, decisions, or work-in-progress that must survive for the rest of this session, persist them with `add_note`/`add_file` so they stay in your context.',
     parameters: {
       type: 'object',
       properties: {
@@ -1550,7 +1792,24 @@ function injectionVisible(agent, decision) {
 
 /** Journal keys a pending record carries. */
 function pendingKeys(pending) {
-  return [...Object.keys(pending?.added ?? {}), ...Object.keys(pending?.removed ?? {})]
+  return PENDING_BUCKETS.flatMap(bucket => Object.keys(pending?.[bucket] ?? {}))
+}
+
+/**
+ * Overlay this step's freshly detected file changes onto the journal used for
+ * composition. They are never persisted on their own: the sighting that records
+ * them is written together with the delivery, so a step that sent nothing simply
+ * detects the same change again on the next step.
+ */
+function withChanged(pending, changedIds, items) {
+  if (changedIds.length === 0) return pending
+  let next = pending
+  for (const id of changedIds) {
+    const item = items.find(candidate => candidate.id === id)
+    if (item === undefined) continue
+    next = applyPending(next, { action: 'changed', key: id, kind: 'file', id, label: item.displayPath })
+  }
+  return next
 }
 
 /**
@@ -1569,16 +1828,18 @@ function injectMessage(decision, messages, message) {
  * - the guarded set is not on the surface (after a compaction, or the first time
  *   anything gets guarded) → the full snapshot;
  * - the journal holds changes → one incremental message: a sentence per removal
- *   and the content of what was added.
+ *   or refreshed file, and the content of what was added or refreshed.
+ * Mounted files are probed with one `stat` each per step, so an on-disk edit
+ * joins the second trigger without waiting for a compaction.
  * Failures self-heal on the next step; the step itself never fails because of
  * this plugin.
  * @param planProjection - awaited handle for the `plan-guard-docs` unit.
  */
 function createInjector(ctx, planProjection, config, operations) {
-  const clear = async (sessionId, keys) => {
-    if (keys.length === 0) return
+  const clear = async (sessionId, keys, sights) => {
+    if (keys.length === 0 && (sights === undefined || Object.keys(sights).length === 0)) return
     try {
-      await operations.markInjected(sessionId, keys)
+      await operations.deliver(sessionId, keys, sights ?? {})
     } catch (error) {
       ctx.logger?.warn?.(`plan-guard: clearing delivered changes failed for session ${sessionId}: ${String(error)}`)
     }
@@ -1603,42 +1864,56 @@ function createInjector(ctx, planProjection, config, operations) {
       if (planAutoTransition(docs, record, config, sawCompaction) !== undefined) {
         record = (await operations.syncAutoPlans(sessionId, docs, sawCompaction)).record
       }
-      const pending = record.pending ?? emptyPending()
+      const items = Object.values(record.items)
+      // Detect mounted-file changes before deciding whether this step has
+      // anything to say; a probe failure is logged by the catch below and costs
+      // this step its update, not the step itself.
+      const sighting = await operations.observeFileChanges(items, signal)
+      const pending = withChanged(record.pending ?? emptyPending(), sighting.changed, items)
       const keys = pendingKeys(pending)
       const visible = injectionVisible(agent, decision)
-      if (visible && keys.length === 0) return decision
+      // A file whose version moved but whose bytes are identical needs only its
+      // sighting stored. Persist it even on a step that sends nothing, or every
+      // later step would stat, read, and hash that file again.
+      if (visible && keys.length === 0) {
+        await clear(sessionId, [], sighting.sights)
+        return decision
+      }
 
       if (!visible) {
         signal?.throwIfAborted?.()
-        const mountedItems = Object.values(record.items).filter(item => item.mounted === true)
+        const mountedItems = items.filter(item => item.mounted === true)
         let composed
+        let contents = {}
         if (docs.length > 0 || mountedItems.length > 0) {
           signal?.throwIfAborted?.()
-          const contents = await operations.readFileContents(Object.values(record.items), signal)
+          contents = await operations.readFileContents(mountedItems, signal, sighting.contents)
           signal?.throwIfAborted?.()
           composed = composeGuardText({ docs, record, config, sawCompaction, contents })
         }
         if (composed === undefined) {
-          await clear(sessionId, keys)
+          await clear(sessionId, keys, sighting.sights)
           return decision
         }
         const entered = injectMessage(decision, messages, guardMessage(composed.text))
-        await clear(sessionId, keys)
+        await clear(sessionId, keys, { ...sighting.sights, ...operations.sightsFor(mountedItems, contents, sighting.versions) })
         ctx.logger?.debug?.('plan-guard: injected the guarded snapshot (turn %d step %d, %d plan(s), %d item(s))', turn, step, composed.included.length, mountedItems.length)
         return entered
       }
 
       signal?.throwIfAborted?.()
-      const contents = await operations.readFileContents(Object.values(record.items), signal)
+      const wanted = new Set([...Object.keys(pending.added), ...Object.keys(pending.changed)])
+      const targets = items.filter(item => item.mounted === true && item.kind === 'file' && wanted.has(item.id))
+      const contents = await operations.readFileContents(targets, signal, sighting.contents)
       signal?.throwIfAborted?.()
       const update = composeUpdate({ pending, record, docs, config, sawCompaction, contents })
       if (update === undefined) {
-        await clear(sessionId, keys)
+        await clear(sessionId, keys, sighting.sights)
         return decision
       }
       const entered = injectMessage(decision, messages, guardMessage(update.text))
-      await clear(sessionId, keys)
-      ctx.logger?.debug?.('plan-guard: injected guarded changes (turn %d step %d, %d added, %d removed)', turn, step, update.added.length, update.removed.length)
+      await clear(sessionId, keys, { ...sighting.sights, ...operations.sightsFor(targets, contents, sighting.versions) })
+      ctx.logger?.debug?.('plan-guard: injected guarded changes (turn %d step %d, %d added, %d refreshed, %d removed)', turn, step, update.added.length, update.changed.length, update.removed.length)
       return entered
     } catch (error) {
       ctx.logger?.warn?.(`plan-guard: injection failed for session ${agent.session?.id}: ${String(error)}`)
@@ -1853,13 +2128,17 @@ export async function apply(ctx, config) {
     stateSchema,
     init: stateInit,
     apply: foldDocs,
-    stateVersion: 3,
+    // 4: verdicts now read the current `exit_plan_mode` outcome, which is a
+    // plain success in both directions, plus the awaiting-verdict marker. A
+    // cache row at an older version is re-folded from the session log by the
+    // runtime, which settles previously mis-read (always "accepted") verdicts.
+    stateVersion: 4,
   })
   // The pre-0.2.2 runtime returned a bare disposer; awaiting it yields the
   // disposer function itself, which has no `stateOf`. Fail loud instead of
   // silently reading `undefined` for every Session.
   if (typeof planProjection?.stateOf !== 'function') {
-    throw new Error('dsh-plan-guard 0.8.0 requires DSH 0.2.2-rc.5 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
+    throw new Error('dsh-plan-guard 0.9.0 requires DSH 0.2.2-rc.5 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
   }
 
   const operations = createOperations(ctx, domain, planProjection, sessions, options)
@@ -1898,6 +2177,8 @@ export const __testables = {
   applyPending,
   planDocument,
   foldDocs,
+  planVerdict,
+  withChanged,
   stateInit,
   stateSchema,
   normalizeTitle,
