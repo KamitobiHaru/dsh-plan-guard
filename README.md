@@ -7,16 +7,17 @@
 - **模型可增不可删**：模型能加备注/文件、挂载/卸载；不能动 Plan，也不能删除任何条目（包括自己加的，留痕审计）。删除只有人类能做。
 - **权限归人类**：会话级五档权限 + 条目级锁定；模型动作可以要求对话内批准，拒绝/超时都不写入。
 - **变更立刻可见**：新增内容在下一个 step 就能被模型看到，卸载只在尾部追加一行提示，不等压缩。
+- **已挂载 = 全文送达**：插件不截断、不省略任何已挂载内容，也没有体积上限。`context_guard` 里没有「读回全文」的动作，压缩后注入块就是唯一副本——给一半比不给更危险，所以干脆不给留半个的余地。
 - **文件改动自动更新**：注入时才按工作区复核并读取文件，不存快照；每个 step 再对挂载的文件做一次 `stat`，版本变了才读正文——真变了就在下一步把新全文重送一遍（段标题带 `(changed)`），内容没变（`touch`、重写同内容）只更新记账。
 - **正交**：不修改任何压缩配置或预设，可以和 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)（更快触发压缩的副本预设）同时安装。
 
-> **v0.9.0 状态**：Host/Client 实现与 72 个测试已完成。0.9.0 修掉「没批准的计划也会被挂载」——`exit_plan_mode` 的通过与拒绝在当前运行时**都是 `isError: false` 的成功结果**，结论改从结果正文与 `plan/mode` 事件判定，并改成 fail-closed：只有确认批准的计划才自动挂载；同时新增挂载文件的磁盘改动自动更新（每步一次 `stat`，正文真变了才重送）。0.8.0 适配 DSH 0.2.2-rc.5（`ctx.agents.roots()` 已移除，root/subagent 改用 `Session.header.origin`）、默认取消条目数量上限、权限问题卡片展示完整备注并准确标记文件预览截断；0.7.0 的异步投影、0.6.2 的抽屉预览与 0.6.1 的 `add_file` 修复都在。需重启 `dsh web` 生效。
+> **v0.10.0 状态**：Host/Client 实现与 77 个测试已完成。0.10.0 **删掉了截断与省略机制**：`maxCharsPerPlan` / `maxCharsPerFile` / `maxCharsPerNote` / `maxTotalChars` 四个配置连同行为一起移除，已挂载的计划、备注、文件一律全文送达（旧 profile 里还写着这些字段会被忽略并 warn 一次，插件照常激活）。0.9.0 修好了「没批准的计划也被挂载」（结论改读结果正文与 `plan/mode`，判定 fail-closed）并给挂载文件加了磁盘改动自动更新（每步一次 `stat`，正文真变了才重送）；0.8.0 适配 DSH 0.2.2-rc.5、默认取消条目数量上限、权限卡片展示完整备注。需重启 `dsh web` 生效。
 
 ## 工作原理
 
 DSH 的会话日志是追加式的：压缩不删除事件，只是把一段事件从模型可见的 surface 里移走，换成一条检查点。Plan 正文本来就只存在于日志中 `exit_plan_mode` 的 `tool/call` 参数里，所以插件不复制 Plan：
 
-1. **Plan 投影**：`sessionProjections` 从会话日志折叠出一份轻量投影 `plan-guard-docs`，记录每个 `exit_plan_mode`（含 PTC 派发）的 callId、标题、大小、提交轮次和 markdown（单条上限 64k），并记住是否发生过一次成功压缩。批准/拒绝的结论从**结果正文**读（`tool/result`，PTC 走 `tool/ptc-dispatch`）：当前运行时两个方向都是成功结果，`isError` 只在硬失败时为真，所以判定靠正文里的 `Plan approved` / `dismissed`。正文认不出来时先挂起，若紧接着出现 `plan/mode {active:false}`（退出计划模式，批准路径的结构标记）就算批准；中间被 `user/message` / `tool/call` / `command/run` 打断就永远算「未确认」。**未确认与被拒同样处理：不自动挂载**。
+1. **Plan 投影**：`sessionProjections` 从会话日志折叠出一份轻量投影 `plan-guard-docs`，记录每个 `exit_plan_mode`（含 PTC 派发）的 callId、标题、大小、提交轮次和**完整** markdown，并记住是否发生过一次成功压缩。批准/拒绝的结论从**结果正文**读（`tool/result`，PTC 走 `tool/ptc-dispatch`）：当前运行时两个方向都是成功结果，`isError` 只在硬失败时为真，所以判定靠正文里的 `Plan approved` / `dismissed`。正文认不出来时先挂起，若紧接着出现 `plan/mode {active:false}`（退出计划模式，批准路径的结构标记）就算批准；中间被 `user/message` / `tool/call` / `command/run` 打断就永远算「未确认」。**未确认与被拒同样处理：不自动挂载**。
 2. **守护记录**：抽屉和工具把人类的选择写进 storage domain `plan-guard` 的 `sessions` 表，每个 session 一条 `{version: 2, policy, plans, items}`。Plan 只在记录里存 `mounted` / `unmounted` 标记；备注正文存记录，文件只存路径与元数据。
 3. **注入时机**：`agent/pre-step` 瀑布在 `await next()` 之后拼一条 user 消息，插在本次进入的消息之后、runtime-context 之前。三条触发线：surface 上还没有守护消息时（首次注入，或压缩把它换成了摘要检查点）发**完整快照**；守护集合有变更时发**增量**；挂载的文件在磁盘上被改动（`stat` 的版本变了、正文摘要也确实不同）时也发**增量**，把新全文重送一遍。新批准计划自动挂载时，内部 `syncAutoPlans` 先把它的 `added` 与旧自动计划的 `removed` 记进日记（人类显式选择不碰），随增量同发。消息由 agent-loop 记成 `user/message`，满足「模型可见 ⟺ 已记录」。
 4. **增量只追加**：新增条目发正文（与快照同一套 `## Plan` / `## Note` / `## File` 段落）；卸载或删除只发一句 `Note "…" (note:…) is no longer guarded.`（标题加唯一编号）。所有注入都追加在请求尾部，历史消息一字不改，所以 KV cache 的前缀照常复用；这段文字留到下次压缩为止。
@@ -96,8 +97,8 @@ item: file:…
 
 - **Plan 从日志推导**，不复制正文到 storage；取不到时给标记，不会中断注入。
 - **备注正文存 storage**；**文件在注入时实时读取**：添加时记下绝对路径和当时的 workspace root，注入时复核仍在该 root 内（除非显式允许越界），然后读最新内容。缺失、二进制、越界、超大都会写成可见标记，不会静默丢弃，也不会让 step 失败。
-- **文件带「记账」**：每次注入把实际送出的正文摘要与 `stat` 版本（`dev:ino:size:mtime:ctime`）写回条目。下一步只做一次 `stat`：版本没动就什么都不发生；动了才读正文比对摘要，确实不同才重发。所以 `touch`、`git checkout` 重写同内容、或改动落在 `maxCharsPerFile` 截断之外，都不会打扰模型。
-- **四层上限**：单 Plan、单文件、单备注、总字符。超出时截断并标记；总上限溢出时按顺序保留，剩下的以省略 id 列出。
+- **文件带「记账」**：每次注入把实际送出的正文摘要与 `stat` 版本（`dev:ino:size:mtime:ctime`）写回条目。下一步只做一次 `stat`：版本没动就什么都不发生；动了才读正文比对摘要，确实不同才重发。所以 `touch`、`git checkout` 重写同内容，都不会打扰模型；正文是全文比对，改在尾部也算改动。
+- **没有体量上限，也没有截断**：0.10.0 起删掉了 `maxCharsPerPlan` / `maxCharsPerFile` / `maxCharsPerNote` / `maxTotalChars` 四个配置与它们的全部行为（曾经的实现是「超了就砍尾」或「装不下就整段不发，只在尾部列 id」）。原因：模型侧没有读回全文的动作，压缩后注入块是计划与备注的唯一副本，被砍掉的那一半在模型的世界里根本不存在——而 pin 这个动作本身就是「这必须完整在场」的声明。文件读失败仍会写成可见标记（`file unreadable: …`），因为那是失败而不是削减。
 - 快照只在 surface 上没有守护消息时发送；增量每条变更只发一次，卸载不重发正文。
 
 ## 配置
@@ -109,25 +110,23 @@ item: file:…
 | `disabled` | `false` | 关闭注入（工具与抽屉仍可用） |
 | `toolEnabled` | `true` | 是否注册 `context_guard` |
 | `header` | `Guarded context (plans, notes, files)` | 注入消息首行 |
-| `maxCharsPerPlan` | `20000` | 单 Plan 注入上限（字符） |
-| `maxCharsPerFile` | `20000` | 单文件注入上限 |
-| `maxCharsPerNote` | `20000` | 单备注上限 |
-| `maxTotalChars` | `100000` | 全部注入内容总上限 |
 | `maxItems` | `0` | 备注 + 文件条目上限；`0` = 不限（Plan 不计） |
 | `defaultPolicy` | `ask` | 没有存储记录时使用的权限模式 |
 | `autoMountLatestPlan` | `true` | 首次压缩后自动挂载最新 Plan（被拒、结论未确认的不挂） |
 | `refreshChangedFiles` | `true` | 每步探测挂载文件的磁盘改动，正文变了就重送；关掉后只在注入时读 |
 | `askTimeoutMs` | `120000` | 权限问题等待上限 |
 | `allowOutsideWorkspace` | `false` | 允许挂载工作区外的绝对路径文件 |
-| `previewChars` | `4000` | `add_file` 返回的预览上限 |
+| `previewChars` | `4000` | 预览上限：只作用于 `add_file` 的返回值与权限卡片，不影响注入 |
 
-**总上限与压缩振荡**：注入内容会进入下一轮压缩的输入。把 `maxTotalChars` 控制在压缩阈值（tokens）× 约 4 以下；如果观察到压缩后立刻又触发压缩，就调低它。插件本身不修改任何压缩参数。
+**体量由挂载的人负责**：注入内容会进入下一轮压缩的输入，而现在没有任何东西替你削减它。挂载很大或很多内容时，压缩会更频繁、历史更快被摘要掉——守护块仍会在每次压缩后全文重发，所以丢的是历史，不是约束。插件本身不修改任何压缩参数（要控制压缩节奏用 [`dsh-compaction-tune`](https://github.com/KamitobiHaru/dsh-compaction-tune)）。
+
+**废弃字段**：profile 里若还写着 `maxCharsPerPlan`、`maxCharsPerFile`、`maxCharsPerNote`、`maxTotalChars`，插件照常激活，Host 日志里 warn 一次并忽略这些字段（不会当成未知字段报错）。
 
 ## 安装
 
 前置：可用的 DSH（开发验证于 `0.2.2-rc.5` 运行时），`dsh web` 能正常启动。安装 spec 固定到 tag：
 
-    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.9.0
+    dsh plugin --profile web add github:KamitobiHaru/dsh-plan-guard#v0.10.0
 
 **方式一：命令行** —— 上面的命令。
 
@@ -149,7 +148,7 @@ item: file:…
 
 挂载/卸载在**下一步**就进入模型上下文；模型动作需要权限时，对话里出现问题卡片，允许后工具在同一次调用里完成，拒绝/超时则不写入。
 
-问题卡片里备注正文完整展示（上限 `maxCharsPerNote`）；内容超过 1000 字符时，顶部会提示向下滚动、允许 / 拒绝按钮在内容之后。文件只预览前 `previewChars` 个字符，卡片会写明文件字节数与截断标记，并说明这是预览而非全文；允许后在抽屉或预览器里打开完整文件。
+问题卡片是给人审阅的面板，所以备注与文件都只预览前 `previewChars` 个字符，卡片会写明总长与「这是卡片预览、存储与注入的都是全文」。内容超过 1000 字符时，顶部提示向下滚动、允许 / 拒绝按钮在正文之后。这条预览限制**不影响投递**：注入的是完整正文。
 
 ## 已知限制
 
@@ -158,15 +157,13 @@ item: file:…
 - **卸载提示只是一句话**：`… (<id>) is no longer guarded.` 不会删掉历史里的旧正文；旧正文要等下次压缩才真正离开 surface。文件被改动时同理：新的 `(changed)` 段追加在尾部，旧正文留在历史上直到下次压缩。
 - **批准判定靠结果正文的关键词**：`Plan approved` / `dismissed` 是当前运行时 `exit_plan_mode` 渲染出的英文文本（两个方向都是成功结果，`isError` 帮不上）。DSH 若改文案，结论会退化成「未确认 → 不自动挂载」，只会漏挂、不会误挂；`plan/mode {active:false}` 作为结构佐证兜住一部分。
 - **首次探测前的等长改动**：升级到 0.9.0 时已有条目没有记账，第一次 `stat` 只在字节数变化时判定为改动；升级期间发生的等长改动要等下次真实改动或压缩快照才纠正。
-- **文件改动会占用总上限**：挂载很多大文件时，一次改动重发的正文与其余内容共享 `maxTotalChars`；挤不下时该条目只在省略标记里出现 id，正文要等下次快照或下一次真实改动。
 - **pending 有上限**：最多记 200 条未送达变更，超出丢最旧的；长时间停用注入（`disabled`）时可能少报几条。
-- **默认不限条目数量**：`maxItems: 0` 时 storage 会随备注/文件增长；进入模型上下文的内容仍受单条与 `maxTotalChars` 上限约束。需要硬上限时在 config 里把 `maxItems` 设为正整数。
+- **默认不限条目数量，也不限单条大小**：`maxItems: 0` 时 storage 随备注/文件增长，而每条内容都是全文投递。需要控制数量时在 config 里把 `maxItems` 设为正整数；**大小没有任何闸门**——挂载一个 5MB 的文本就会把 5MB 送进上下文，并且整份读进 Host 进程内存（`fs.readText` 在本地后端没有体积护栏），这是「pin 即全文」这个选择的直接代价，插件不会替你偷偷削减。
 - **文件默认限工作区**：越界、二进制、缺失都以标记出现；不支持目录、通配符、URL、图片。打开 `allowOutsideWorkspace` 后仍会拒绝符号链接逃逸。
 - **备注不能原地编辑**：改内容要删除后重新添加。删除是 storage 操作，不额外写会话事件。
 - **模型不能删除任何条目**：工具没有删除动作；只能卸载。调用与结果留在会话日志里，便于审计。
 - **`ask` 不依赖 approval policy**：没有客户端或超时即拒绝；超时默认 120 秒，可在 config 里改。
 - **没有自定义工具卡片**：Web 显示默认通用卡片，没有文件选择器。
-- **总上限太大可能造成压缩振荡**：见「配置」一节的建议。
 - **Plan 来源有限**：只认会话日志里的 `exit_plan_mode`（原生与 PTC 派发）；其它方式写出的计划不会被识别。
 
 ## 卸载
@@ -177,10 +174,21 @@ item: file:…
 
 ## 维护与发版
 
-- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（72 个用例）。测试用假 Cordis ctx / 假模块表 / 假文件系统（可变文件表 + `stat`/读取计数），覆盖权限矩阵、Plan 自动/显式/批准/拒绝/未确认/顶替状态、真实会话日志的 `exit_plan_mode` 事件形状、文件改动探测与记账、注入组合与截断、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
-- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.9.0` ↔ `v0.9.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
+- **验证**：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（77 个用例）。测试用假 Cordis ctx / 假模块表 / 假文件系统（可变文件表 + `stat`/读取计数），覆盖权限矩阵、Plan 自动/显式/批准/拒绝/未确认/顶替状态、真实会话日志的 `exit_plan_mode` 事件形状、文件改动探测与记账、注入组合与全文送达、废弃配置兼容、记录兼容、工具/Remote/注入路径、抽屉 markdown 渲染、预览面板与内联位置降级、异步投影句柄与旧运行时拒绝。
+- **发版约定**：`package.json` 的 `version` 与 tag 同名（`0.10.0` ↔ `v0.10.0`）。修 bug 升 patch，加功能升 minor；安装 spec 始终写 `#vX.Y.Z`，不要跟分支。
 - **DSH 是 pre-stable**：插件用到的 `sessionProjections`（0.2.2 起为异步注册，启动时 `await` 并持有句柄）、`storageDomain`、`tools.register`、`userQuestions.askTimed`、`agent/pre-step`、`fs`、Typert Remote 都是当前运行时接口。升级 DSH 后先跑测试，再按「已知限制」里的清单做一次手工验收；接口有变时以 `PLAN.md` 里列出的源码锚点为准。
 - **与 `dsh-compaction-tune` 正交**：它改的是预设里的压缩阈值/保留比例，本插件只读会话事件和 storage，并在 pre-step 只追加注入消息；两者可以同时装。要强制制造压缩来验收，可用它的 `node scripts/set-ratio.mjs 0.01 --retain 0.0005`，测完恢复原值。
+
+### `0.10.0` 移除截断与省略：已挂载 = 全文送达
+
+- **为什么要删**：上一版的行为是「超过 `maxCharsPerPlan` / `maxCharsPerNote` 就砍尾并留标记，超过 `maxCharsPerFile` 干脆不读全，超过 `maxTotalChars` 就整段不发只在尾部列 id」。而核实后的事实是：`context_guard` 只有 `list`/`add_file`/`add_note`/`mount`/`unmount`，**没有任何读回全文的动作**（`content()` 只在 Remote 上给抽屉用）；计划正文原本只存在于那条 `exit_plan_mode` 的 `tool/call` arguments 里，备注只存在于 `add_note` 的参数里，而压缩正是把它们从 surface 换掉的机制。所以压缩之后注入块就是**唯一副本**，砍掉的后半在模型的世界里根本不存在。连「文件可以让模型自己 Read」也不成立：平台自带 `read` 工具默认 `READ_MAX_BYTES = 50KB`、单行 `2000` 字符。pin 这个动作本身就是「这必须完整在场」的声明，插件没有立场替它削减。
+- **删了什么**：`planDocument` 的 65536 存储上限、`planSectionText` / `noteSectionText` / `itemBodyText` 的三处砍尾与 `[plan-guard: … truncated at …]` 标记、`readStoredFile` 的 `readTextCapped(…, maxCharsPerFile)`（改 `fs.readText` 整读）、`composeGuardText` 与 `composeUpdate` 里的预算累加、`omitted` 列表与 `[plan-guard: omitted over the total cap: …]` 行、`addNote` 对超长备注的拒绝、`validateToolArgs` 对 `add_note` 文本的上限、`state().limits` 里的四个字段、抽屉备注 textarea 的 `maxLength` 与「已截断」徽标。
+- **顺带消失的两个毛病**：0.9.0 里「提示行说正文在下面，正文却被预算挤掉」的自相矛盾（不再有挤掉）；以及「只改 `maxCharsPerFile` 之后的尾部不算改动」（`seenDigest` 现在覆盖完整正文，尾部改动也会重发）。
+- **配置兼容**：四个字段进 `DEPRECATED_CONFIG_FIELDS`，`validateConfig` 不再报「unknown config field」、也不写进 resolved；`apply` 检测到就 `logger.warn` 一次。这样老 profile 不会像 0.2.0 那次因字段名直接激活失败。
+- **保留的两处「预览」**：`previewChars` 只管 `add_file` 返回值和权限卡片给人看的那一眼，卡片文案明确写「卡片预览，存储与注入的都是全文」；`maxItems`（默认 0 = 不限）本来就是拒绝式而非削减。
+- **代价（写进已知限制）**：没有任何大小闸门了。挂载 5MB 文本就是把 5MB 送进上下文，并且 `fs.readText` 在本地后端没有体积护栏（只有 `readBytes(..., maxBytes)` 会抛 `FS_TOO_LARGE`），整份会进 Host 进程内存；压缩会更频繁、历史更快被摘要——但守护内容不丢，每次压缩后仍全文重发。
+- 投影 `stateVersion 4 → 5`：被旧 64k 上限存成截断副本的缓存行整表重折，从会话日志恢复全文；storage record 仍为 version 2。
+- 测试：77 个用例（新增 160k 文件全文注入、70k 备注全文注入、80k 计划投影与注入全文、四个废弃字段被忽略且 warn 一次、快照与增量里 grep 不到 truncat/omit 标记、抽屉无 `maxLength` 无截断徽标；移除旧的总上限省略与截断标记断言）。
 
 ### `0.9.0` 修「没批准也挂载」+ 挂载文件自动更新（结论改读正文与 `plan/mode`）
 

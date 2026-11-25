@@ -492,3 +492,37 @@ test('rows label an unconfirmed verdict and a file awaiting its refresh', async 
   assert.match(String(itemRow(true)), /Changed on disk/)
   assert.ok(!String(itemRow(false)).includes('Changed on disk'))
 })
+
+test('the note form has no length gate and previews carry no truncation badge', async () => {
+  const item = {
+    kind: 'file', id: 'file:1', title: 'big.txt', path: 'big.txt',
+    mounted: true, locked: false, createdBy: 'human', size: 160000,
+  }
+  const state = { live: true, policy: 'ask', plans: [], items: [item], limits: { maxItems: 0, previewChars: 4000 } }
+  // A stale `truncated: true` from an older Host must not produce a badge now.
+  const content = { id: item.id, status: 'ready', value: { kind: 'file', title: 'big.txt', text: 'whole body', truncated: true } }
+  const initial = [state, undefined, undefined, item.id, content, 'note', '', 'a very long note body', '', undefined]
+  let hook = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: () => [initial[hook++], () => {}],
+    useEffect: () => {},
+    useRef: value => ({ current: value }),
+    useMemo: factory => factory(),
+    useCallback: callback => callback,
+    Fragment: 'Fragment',
+  }
+  const seeded = await loadClientModule({}, React)
+  const tree = seeded.module.__testables.Drawer({
+    sessionId: 's1',
+    useResource: () => ({ status: 'live', value: state }),
+    t: key => key,
+    api: {},
+    useTabInfo: undefined,
+  })
+  const nodes = flatElements(tree)
+  const textarea = nodes.find(node => node.type === 'textarea')
+  assert.ok(textarea, 'the note form renders')
+  assert.equal(textarea.props.maxLength, undefined, 'nothing gates the note length any more')
+  assert.equal(nodes.filter(node => node.props?.className === 'pg-previewMeta').length, 0, 'no truncation badge exists in the drawer')
+})

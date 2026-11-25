@@ -124,7 +124,6 @@ window.__ModuleLoader__.load({
         'add.filePlaceholder': 'src/important.md',
         'content.loading': 'Loading content…',
         'content.failed': 'Content failed to load.',
-        'content.truncated': 'truncated',
         'content.unavailable': 'No content.',
         'preview.label': 'Preview',
         'preview.collapse': 'Collapse',
@@ -204,7 +203,6 @@ window.__ModuleLoader__.load({
         'add.filePlaceholder': 'src/important.md',
         'content.loading': '正在读取内容……',
         'content.failed': '内容加载失败。',
-        'content.truncated': '已截断',
         'content.unavailable': '没有可显示的内容。',
         'preview.label': '预览',
         'preview.collapse': '收起',
@@ -579,12 +577,6 @@ window.__ModuleLoader__.load({
   font: var(--dsw-font-xxs-12);
   font-weight: 500;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pg-previewMeta {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary, inherit);
-  font: var(--dsw-font-xxs-12);
   white-space: nowrap;
 }
 .pg-previewToggle {
@@ -1073,7 +1065,6 @@ window.__ModuleLoader__.load({
 
     function ContentBlock({ content, t, markdown, onCollapse }) {
       let body
-      let meta
       if (content === undefined || content.status === 'loading') {
         body = h('p', { className: 'pg-empty' }, t('content.loading'))
       } else if (content.status === 'failed') {
@@ -1085,7 +1076,6 @@ window.__ModuleLoader__.load({
         } else if (value.error !== null && value.error !== undefined) {
           body = h('p', { className: 'pg-error' }, `${t('items.contentError')} ${value.error}`)
         } else {
-          if (value.truncated === true) meta = t('content.truncated')
           const text = String(value.text ?? '')
           // The shared GFM renderer the built-in document viewer uses, at its
           // default reading size (the compact variant is a dim hint style).
@@ -1097,7 +1087,6 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'pg-preview' },
         h('div', { className: 'pg-previewHead' },
           h('span', { className: 'pg-previewLabel' }, t('preview.label')),
-          meta === undefined ? null : h('span', { className: 'pg-previewMeta' }, meta),
           h('button', {
             type: 'button', className: 'pg-previewToggle',
             title: t('preview.collapse'), onClick: onCollapse,
@@ -1257,7 +1246,6 @@ window.__ModuleLoader__.load({
       const items = Array.isArray(state.items) ? state.items : []
       const limits = isRecord(state.limits) ? state.limits : {}
       const policy = state.policy ?? state.defaultPolicy ?? 'ask'
-      const noteMax = typeof limits.maxCharsPerNote === 'number' ? limits.maxCharsPerNote : 20000
       const itemMax = typeof limits.maxItems === 'number' ? limits.maxItems : 0
       const planRows = plans.slice().reverse().map(plan => h(PlanRow, {
         key: plan.callId,
@@ -1310,7 +1298,7 @@ window.__ModuleLoader__.load({
             onChange: event => setNoteTitle(event.target.value),
           }),
           h('textarea', {
-            className: 'pg-textarea', value: noteText, maxLength: noteMax,
+            className: 'pg-textarea', value: noteText,
             placeholder: t('add.notePlaceholder'), 'aria-label': t('add.noteText'),
             onChange: event => setNoteText(event.target.value),
           }),

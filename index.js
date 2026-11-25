@@ -57,14 +57,6 @@ const DEFAULT_CONFIG = {
   toolEnabled: true,
   /** Injected message header line. */
   header: 'Guarded context (plans, notes, files)',
-  /** Per-plan injectable character cap; a longer plan truncates with a marker. */
-  maxCharsPerPlan: 20000,
-  /** Per-file injectable character cap. */
-  maxCharsPerFile: 20000,
-  /** Per-note injectable character cap. */
-  maxCharsPerNote: 20000,
-  /** Total injected character cap across plans and items. */
-  maxTotalChars: 100000,
   /** Maximum number of stored notes/files; 0 disables the count limit (plans are derived, not counted). */
   maxItems: 0,
   /** Permission mode for Sessions without a stored choice. */
@@ -82,14 +74,21 @@ const DEFAULT_CONFIG = {
 }
 
 const CONFIG_FIELD_LIMITS = {
-  maxCharsPerPlan: [1000, 200000],
-  maxCharsPerFile: [1000, 200000],
-  maxCharsPerNote: [1000, 200000],
-  maxTotalChars: [5000, 1000000],
   maxItems: [0, 10000],
   askTimeoutMs: [5000, 600000],
   previewChars: [500, 20000],
 }
+
+/**
+ * Config fields that sized the old truncation and omission mechanism. Removing
+ * mounted content silently was the bug this plugin set out to fix, so the caps
+ * are gone rather than reinterpreted: guarded content is delivered in full.
+ * They stay accepted-and-ignored on purpose — `apply` rejects unknown fields,
+ * and a profile row that still sets one of these must not fail to activate.
+ */
+export const DEPRECATED_CONFIG_FIELDS = Object.freeze([
+  'maxCharsPerPlan', 'maxCharsPerFile', 'maxCharsPerNote', 'maxTotalChars',
+])
 
 const CONFIG_BOOLEAN_FIELDS = ['disabled', 'toolEnabled', 'autoMountLatestPlan', 'allowOutsideWorkspace', 'refreshChangedFiles']
 
@@ -208,7 +207,8 @@ export function validateConfig(value) {
     }
   }
   for (const key of Object.keys(record)) {
-    if (!(key in DEFAULT_CONFIG)) pushIssue(`unknown config field ${JSON.stringify(key)}`)
+    if (key in DEFAULT_CONFIG) continue
+    if (!DEPRECATED_CONFIG_FIELDS.includes(key)) pushIssue(`unknown config field ${JSON.stringify(key)}`)
   }
   return issues.length > 0 ? { issues } : { value: resolved }
 }
@@ -258,17 +258,18 @@ const stateSchema = {
 }
 
 /**
- * One plan document reduced from an accepted submission. The text is stored
- * capped with a tail marker so the projection state cannot grow without limit.
+ * One plan document reduced from an accepted submission. The full markdown is
+ * kept: the injected guard block is the only place a plan can be read from once
+ * a compaction has replaced the `exit_plan_mode` call arguments on the surface,
+ * and the model has no tool that fetches the rest. The session log already
+ * stores the whole plan, so keeping the copy bounded by nothing is not a new
+ * cost — it is what makes the guard faithful.
  */
 export function planDocument(callId, markdown, turn) {
-  const capped = markdown.length > 65536
-    ? `${markdown.slice(0, 65536)}\n[plan-guard: plan stored truncated past 65536 characters]`
-    : markdown
-  const heading = /^#\s+(\S[^\r\n]*)/.exec(capped.trim())?.[1]
-  const firstLine = /^[^\r\n]*/.exec(capped.trim())[0]
+  const heading = /^#\s+(\S[^\r\n]*)/.exec(markdown.trim())?.[1]
+  const firstLine = /^[^\r\n]*/.exec(markdown.trim())[0]
   const title = (heading ?? firstLine).trim() || 'Untitled plan'
-  return { callId, turn, title, markdown: capped }
+  return { callId, turn, title, markdown }
 }
 
 /** Read one plan from a native `tool/call` event's untrusted logged arguments. */
@@ -705,6 +706,14 @@ function optionalStringArg(args, field, max) {
 }
 
 /**
+ * Upper bound for tool text arguments. Effectively unlimited on purpose: a note
+ * is pinned precisely because it must stay in context whole, so the plugin
+ * neither cuts it at delivery nor refuses it at pin time. Storage size is the
+ * human's decision, not something this plugin hides by delivering less.
+ */
+const UNLIMITED_TEXT = Number.MAX_SAFE_INTEGER
+
+/**
  * Validate and normalize one `context_guard` call. The tool runtime does not
  * validate raw tool arguments, so every action enforces its own fields here.
  */
@@ -733,7 +742,7 @@ export function validateToolArgs(args, config) {
     }
   }
   if (action === 'add_note') {
-    const text = requireStringArg(args, 'text', 1, config.maxCharsPerNote)
+    const text = requireStringArg(args, 'text', 1, UNLIMITED_TEXT)
     return { action, text, title: optionalStringArg(args, 'title', 200) }
   }
   return { action, itemId: requireStringArg(args, 'itemId', 1, 200) }
@@ -761,55 +770,51 @@ async function readTextCapped(fs, target, cap, signal) {
   return { text, truncated }
 }
 
-/** One plan document as an injected section. */
-function planSectionText(doc, config) {
-  const body = doc.markdown.length > config.maxCharsPerPlan
-    ? `${doc.markdown.slice(0, config.maxCharsPerPlan)}\n[plan-guard: plan truncated at ${config.maxCharsPerPlan} characters]`
-    : doc.markdown
-  return `## Plan: ${doc.title}\nplan: ${doc.callId}\n\n${body}`
+/** One plan document as an injected section, in full. */
+function planSectionText(doc) {
+  return `## Plan: ${doc.title}\nplan: ${doc.callId}\n\n${doc.markdown}`
 }
 
-/** One note or file as an injected section, with its unreadable/truncated markers. */
-function itemSectionText(item, config, contents) {
-  return item.kind === 'note' ? noteSectionText(item, config) : fileSectionText(item, config, contents, false)
+/** One note or file as an injected section, with its unreadable markers. */
+function itemSectionText(item, contents) {
+  return item.kind === 'note' ? noteSectionText(item) : fileSectionText(item, contents, false)
 }
 
-/** One note as an injected section. */
-function noteSectionText(item, config) {
-  const body = item.text.length > config.maxCharsPerNote
-    ? `${item.text.slice(0, config.maxCharsPerNote)}\n[plan-guard: note truncated at ${config.maxCharsPerNote} characters]`
-    : item.text
-  return `## Note: ${item.title}\nitem: ${item.id}\n\n${body}`
+/** One note as an injected section, in full. */
+function noteSectionText(item) {
+  return `## Note: ${item.title}\nitem: ${item.id}\n\n${item.text}`
 }
 
 /**
  * One file as an injected section. A refreshed file is labelled `(changed)` so
  * the model reads it as replacing the older copy still sitting in the surface.
  */
-function fileSectionText(item, config, contents, changed) {
+function fileSectionText(item, contents, changed) {
   const heading = changed === true ? `## File: ${item.displayPath} (changed)` : `## File: ${item.displayPath}`
-  return `${heading}\nitem: ${item.id}\n\n${itemBodyText(item, config, contents)}`
+  return `${heading}\nitem: ${item.id}\n\n${itemBodyText(item, contents)}`
 }
 
-/** The bounded body of one file item, with its unreadable/truncated markers. */
-function itemBodyText(item, config, contents) {
+/**
+ * The whole body of one file item. A read failure is reported as a visible
+ * marker and never degrades into a partial body: this plugin delivers guarded
+ * content complete or clearly not at all.
+ */
+function itemBodyText(item, contents) {
   const content = contents?.[item.id]
-  let body
-  if (content === undefined) {
-    body = '[plan-guard: file content unavailable]'
-  } else if (content.error !== undefined) {
-    body = `[plan-guard: file unreadable: ${content.error}]`
-  } else {
-    body = content.text ?? ''
-    if (content.truncated === true) body += `\n[plan-guard: file truncated at ${config.maxCharsPerFile} characters]`
-  }
-  return body
+  if (content === undefined) return '[plan-guard: file content unavailable]'
+  if (content.error !== undefined) return `[plan-guard: file unreadable: ${content.error}]`
+  return content.text ?? ''
 }
 
 /**
  * Compose the full guarded-context snapshot (sent after a compaction, or the
  * first time anything is guarded). Pure apart from the file contents the caller
  * already read; returns undefined when nothing is mounted.
+ *
+ * There is deliberately no size budget here: everything mounted is delivered in
+ * full. The model cannot fetch what a cap would have dropped — `context_guard`
+ * has no read action, and after a compaction this message is the only copy — so
+ * a partial delivery would turn a pin into a silently different constraint.
  */
 export function composeGuardText({ docs, record, config, sawCompaction, contents }) {
   const mountedPlans = docs
@@ -820,34 +825,22 @@ export function composeGuardText({ docs, record, config, sawCompaction, contents
   const humanItems = items.filter(item => item.createdBy === 'human').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
   const modelItems = items.filter(item => item.createdBy !== 'human').sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
   const sections = []
-  const omitted = []
   const included = []
   const header = `${config.header}\n`
-    + 'This block is background context, not a new request. You see the full set only the first time anything is guarded, or again after a compaction wiped it from the surface; afterwards you only get short updates when the guarded set changes (new content in full, removals as one-line notices, and a mounted file that changed on disk re-sent in full under a "(changed)" heading, which replaces the older copy above it).\n\n'
+    + 'This block is background context, not a new request. You see the full set only the first time anything is guarded, or again after a compaction wiped it from the surface; afterwards you only get short updates when the guarded set changes (new content in full, removals as one-line notices, and a mounted file that changed on disk re-sent under a "(changed)" heading, which replaces the older copy above it). Every mounted plan, note, and file is delivered complete: nothing here is truncated and nothing is left out.\n\n'
   const footer = config.toolEnabled === false
     ? '\n\nPlans and pinned items are managed by the user in the Guarded context drawer.\n'
     : '\n\nUse the `context_guard` tool to list, mount, unmount, or add notes/files. Plans are user-controlled.\n'
-  let used = header.length + footer.length
-  if (used >= config.maxTotalChars) return undefined
   const push = (id, section) => {
-    if (used + section.length + 2 > config.maxTotalChars) {
-      omitted.push(id)
-      return
-    }
-    used += section.length + 2
     sections.push(section)
     included.push(id)
   }
-  for (const { doc } of mountedPlans) push(doc.callId, planSectionText(doc, config))
-  for (const item of [...humanItems, ...modelItems]) push(item.id, itemSectionText(item, config, contents))
+  for (const { doc } of mountedPlans) push(doc.callId, planSectionText(doc))
+  for (const item of [...humanItems, ...modelItems]) push(item.id, itemSectionText(item, contents))
   if (sections.length === 0) return undefined
-  const omittedLine = omitted.length === 0
-    ? ''
-    : `\n[plan-guard: omitted over the total cap: ${omitted.join(', ')}]`
   return {
-    text: header + sections.join('\n\n') + omittedLine + footer,
+    text: header + sections.join('\n\n') + footer,
     included,
-    omitted,
   }
 }
 
@@ -909,33 +902,22 @@ export function composeUpdate({ pending, record, docs, config, sawCompaction, co
   if (removedLines.length === 0 && changedLines.length === 0 && addedPlans.length === 0 && addedItems.length === 0) return undefined
 
   const noticeLines = [...removedLines, ...changedLines]
-  const prefix = `${config.header} — update\nBackground context, not a new request.\n\n${noticeLines.length === 0 ? '' : `${noticeLines.join(' ')}\n\n`}`
-  let used = prefix.length
+  const prefix = `${config.header} — update\nBackground context, not a new request. Content below is complete; nothing here is truncated or left out.\n\n${noticeLines.length === 0 ? '' : `${noticeLines.join(' ')}\n\n`}`
   const sections = []
-  const omitted = []
   const included = []
   const changedIncluded = []
   const push = (id, section, changed) => {
-    if (used + section.length + 2 > config.maxTotalChars) {
-      omitted.push(id)
-      return
-    }
-    used += section.length + 2
     sections.push(section)
     included.push(id)
     if (changed === true) changedIncluded.push(id)
   }
-  for (const doc of addedPlans) push(doc.callId, planSectionText(doc, config), false)
-  for (const item of addedItems) push(item.id, itemSectionText(item, config, contents), false)
-  for (const item of changedItems) push(item.id, fileSectionText(item, config, contents, true), true)
-  const omittedLine = omitted.length === 0
-    ? ''
-    : `\n[plan-guard: omitted over the total cap: ${omitted.join(', ')}]`
+  for (const doc of addedPlans) push(doc.callId, planSectionText(doc), false)
+  for (const item of addedItems) push(item.id, itemSectionText(item, contents), false)
+  for (const item of changedItems) push(item.id, fileSectionText(item, contents, true), true)
   return {
-    text: prefix + sections.join('\n\n') + omittedLine,
+    text: prefix + sections.join('\n\n'),
     added: included.filter(id => !changedIncluded.includes(id)),
     changed: changedIncluded,
-    omitted,
     removed: removedLines,
   }
 }
@@ -993,10 +975,6 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
     const session = liveSession(sessionId)
     const limits = {
       maxItems: config.maxItems,
-      maxCharsPerPlan: config.maxCharsPerPlan,
-      maxCharsPerFile: config.maxCharsPerFile,
-      maxCharsPerNote: config.maxCharsPerNote,
-      maxTotalChars: config.maxTotalChars,
       previewChars: config.previewChars,
     }
     if (session === undefined) {
@@ -1148,8 +1126,8 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
         const root = await fs.resolve(item.workspaceRoot, { signal })
         if (!fs.contains(root, target)) return { error: 'file is outside the recorded Session workspace' }
       }
-      const content = await readTextCapped(fs, target, config.maxCharsPerFile, signal)
-      return { text: content.text, truncated: content.truncated }
+      const text = await fs.readText(target, signal)
+      return { text }
     } catch (error) {
       if (signal?.aborted === true) throw error
       return { error: describeError(error) }
@@ -1230,10 +1208,9 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
 
   /**
    * Build sightings for the file bodies one message actually carried. The digest
-   * covers exactly what was injected (bounded by `maxCharsPerFile`), so a later
-   * change beyond that cap cannot make the update loop forever, and an item the
-   * total cap dropped still counts as delivered: the message named the omission.
-   * @param items - items whose content the message included.
+   * covers the complete body that was injected, so a later edit always compares
+   * against what the model really saw — including a change in the tail.
+   * @param items - items whose content the message carried.
    * @param contents - the bodies that were composed into the message.
    * @param versions - the metadata `observeFileChanges` probed this step.
    */
@@ -1256,9 +1233,9 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
   /**
    * Account for one delivered injection: drop the journal keys it covered and
    * store the file sightings it carried, in a single write. Stamping only here
-   * means a step that never sent a message leaves the change pending, and a file
-   * the total cap could not fit is still stamped (the message names the omission)
-   * instead of re-firing on every following step.
+   * means a step that never sent a message leaves the change pending, so the
+   * next step simply detects it again — nothing is ever marked seen without
+   * having been shown.
    * @param sessionId - target Session.
    * @param keys - journal keys the injected message accounted for.
    * @param sights - `{ itemId: { seenVersion, seenDigest, size } }`.
@@ -1337,9 +1314,6 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
     const text = note.text
     if (!isNonEmptyString(text) || text.trim() === '') throw new Error('The note body must not be blank.')
     const title = normalizeTitle(note.title) ?? titleFromText(text)
-    if (text.length > config.maxCharsPerNote) {
-      throw new Error(`The note exceeds the ${config.maxCharsPerNote}-character limit.`)
-    }
     return mutate(sessionId, (current) => {
       if (config.maxItems > 0 && Object.keys(current.items).length >= config.maxItems) {
         throw new Error(`This Session already has the maximum of ${config.maxItems} pinned items; remove one before adding another.`)
@@ -1426,7 +1400,9 @@ function createOperations(ctx, domain, planProjection, sessions, config) {
         kind: 'file',
         title: item.title,
         text: readFile.text ?? null,
-        truncated: readFile.truncated === true,
+        // Always false now: nothing is cut any more. The field stays in the
+        // wire shape so an older Client bundle cannot mis-read a preview.
+        truncated: false,
         error: readFile.error ?? null,
       }
     }
@@ -1506,9 +1482,10 @@ function permissionQuestion(action, target, config) {
   if (content !== undefined && content !== '') {
     const options = config ?? DEFAULT_CONFIG
     const isFile = target.kind === 'file'
-    const limit = isFile
-      ? Math.max(1, options.previewChars)
-      : Math.max(1, options.maxCharsPerNote)
+    // The card is a human review surface, so it previews at `previewChars` for
+    // both kinds. This bounds the card only: what gets stored and injected is
+    // the complete body either way.
+    const limit = Math.max(1, options.previewChars)
     const truncated = content.length > limit || target.previewTruncated === true
     const shown = content.length > limit ? content.slice(0, limit) : content
     const bytes = isFile && typeof target.size === 'number' ? target.size : undefined
@@ -1526,7 +1503,7 @@ function permissionQuestion(action, target, config) {
         : `Preview / 预览（${bytes === undefined ? '完整预览' : `共 ${bytes} 字节 / ${bytes} ${byteWord}`}，完整内容如下 / shown in full）:`)
     } else {
       detail.push(truncated
-        ? `Content / 内容（共 ${content.length} 字符；以下为前 ${shown.length} 字符 / ${content.length} chars total; first ${shown.length} shown）:`
+        ? `Content / 内容（全文共 ${content.length} 字符；卡片只显示前 ${shown.length} 字符，存储与注入的都是完整正文 / ${content.length} chars in total; the card previews the first ${shown.length}, while the stored and injected body is complete）:`
         : `Content / 内容（共 ${content.length} 字符，可在卡片内滚动查看 / ${content.length} chars; scroll inside the card to read it）:`)
     }
     detail.push('')
@@ -1614,7 +1591,7 @@ function toolPreviewText(item, prepared) {
 function createTool(ctx, operations, config) {
   return {
     name: TOOL_NAME,
-    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they stay in your context across steps and compactions. Plans are user-controlled; this tool cannot mount or unmount them. Only a plan the user explicitly approved can auto-mount, and only after the first compaction; a rejected or unconfirmed plan stays listed but never auto-mounts. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step and the full set is re-sent only when the surface holds no guarded message (first guarding, or after a compaction); otherwise only changes arrive: new content in full, a mounted file whose bytes changed on disk re-sent in full under a "(changed)" heading, and an unmount as one short notice instead of removing earlier text; `add_file` returns a bounded preview. Items cannot be deleted with this tool; only the user can delete them. When you hold facts, decisions, or work-in-progress that must survive for the rest of this session, persist them with `add_note`/`add_file` so they stay in your context.',
+    description: 'Manage this Session\'s guarded context: the plans, notes, and files the user pins so they stay in your context across steps and compactions. Plans are user-controlled; this tool cannot mount or unmount them. Only a plan the user explicitly approved can auto-mount, and only after the first compaction; a rejected or unconfirmed plan stays listed but never auto-mounts. `list` shows plans and pinned items. `add_file` and `add_note` add an item and mount it; `mount` and `unmount` change an existing item. Adding or mounting may require the user\'s permission; a denied request changes nothing. Mounted content reaches you from the next step, always in full — nothing is truncated or left out, and this tool has no action that would fetch a missing part, so what you see is the whole item. The full set is re-sent only when the surface holds no guarded message (first guarding, or after a compaction); otherwise only changes arrive: new content in full, a mounted file whose bytes changed on disk re-sent in full under a "(changed)" heading, and an unmount as one short notice instead of removing earlier text; `add_file` also returns a preview of the file for convenience. Items cannot be deleted with this tool; only the user can delete them. When you hold facts, decisions, or work-in-progress that must survive for the rest of this session, persist them with `add_note`/`add_file` so they stay in your context.',
     parameters: {
       type: 'object',
       properties: {
@@ -2108,6 +2085,15 @@ export async function apply(ctx, config) {
     throw new Error(`plan-guard config rejected: ${check.issues.map(issue => issue.message).join('; ')}`)
   }
   const options = check.value
+  // A profile row may still carry the caps this plugin used to size its
+  // injections. They are ignored, never reinterpreted: guarded content is
+  // delivered whole. Warn once so the row can be cleaned up, then activate.
+  if (isRecord(config)) {
+    const stale = Object.keys(config).filter(key => DEPRECATED_CONFIG_FIELDS.includes(key))
+    if (stale.length > 0) {
+      ctx.logger?.warn?.(`plan-guard: ignored deprecated config field(s) ${stale.join(', ')} — nothing is truncated or omitted any more`)
+    }
+  }
   const projections = ctx.sessionProjections
   const sessions = ctx.get('sessions')
 
@@ -2128,17 +2114,17 @@ export async function apply(ctx, config) {
     stateSchema,
     init: stateInit,
     apply: foldDocs,
-    // 4: verdicts now read the current `exit_plan_mode` outcome, which is a
-    // plain success in both directions, plus the awaiting-verdict marker. A
-    // cache row at an older version is re-folded from the session log by the
-    // runtime, which settles previously mis-read (always "accepted") verdicts.
-    stateVersion: 4,
+    // 5: plan markdown is stored whole. A cache row at an older version is
+    // re-folded from the session log by the runtime, which recovers the tail
+    // the 65536-character storage cap used to drop. (4 added the verdict
+    // reading; both bumps are re-fold-only, no data migration.)
+    stateVersion: 5,
   })
   // The pre-0.2.2 runtime returned a bare disposer; awaiting it yields the
   // disposer function itself, which has no `stateOf`. Fail loud instead of
   // silently reading `undefined` for every Session.
   if (typeof planProjection?.stateOf !== 'function') {
-    throw new Error('dsh-plan-guard 0.9.0 requires DSH 0.2.2-rc.5 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
+    throw new Error('dsh-plan-guard 0.10.0 requires DSH 0.2.2-rc.5 or newer: sessionProjections.register() must resolve to a ProjectionHandle with stateOf()')
   }
 
   const operations = createOperations(ctx, domain, planProjection, sessions, options)
@@ -2161,6 +2147,7 @@ export async function apply(ctx, config) {
 /** Pure helpers exported for `node --test`; not part of the plugin contract. */
 export const __testables = {
   DEFAULT_CONFIG,
+  DEPRECATED_CONFIG_FIELDS,
   POLICIES,
   PLAN_CHOICES,
   TOOL_ACTIONS,

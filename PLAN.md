@@ -41,6 +41,9 @@
 17. 预览是**条目的一部分**，不是 section 末尾的附属块：`PlanRow`/`ItemRow` 外层 `.pg-entry`，内部固定「卡片 → 预览」；标题带展开箭头与 `aria-expanded`，预览头常驻「收起」，收起后焦点回到标题；单展开手风琴，请求序号 + `content.id` 防旧请求串台（0.6.2）。
 18. 批准判定**宁可漏挂不可误挂**（0.9.0）：结论从结果正文关键词 + `plan/mode` 结构事件读，读不出来就停在「未确认」，与「被拒」同样不自动挂载。人类显式挂载永远优先，所以误判方向只会是「需要人多点一下开关」，不会是「把没批准的东西当约束」。文案再改版也只退化、不误挂。
 19. 挂载文件的自动更新走**每步 stat + 按需读盘**（0.9.0）：`fs.stat` 的 `version` 就是 `dev:ino:size:mtimeNs:ctimeNs`，比正文摘要便宜；版本变了才读正文比 sha256，确实不同才注入。记账只在消息真的注入后与清账同一次写入（`deliver`），没注入就不盖章，下一步自然重新判定。不订阅 `workspace/changes`：那个事件只带 `{turn}`、由 git 快照与文件工具驱动，既认不出用户编辑器改的文件，也给不出路径。
+20. **已挂载 = 全文送达，插件不替人类削减**（0.10.0）：截断与省略机制连同四个尺寸配置一起删除，而不是改成「更小但仍在砍」。判据是可达性而非预算：模型侧没有读回全文的动作（`content()` 只在 Remote 上给抽屉用），压缩后注入块是计划与备注的唯一副本；平台自带 `read` 也帮不上文件（默认 50KB / 单行 2000 字符）。pin 就是「必须完整在场」的声明，所以宁可可负担，不可不完整。
+21. 删除的尺寸配置必须**被忽略而不是报错**：`apply` 对未知 config 字段是抛错的（0.2.1 那次激活失败就是这么来的），所以 `maxCharsPerPlan`/`maxCharsPerFile`/`maxCharsPerNote`/`maxTotalChars` 进 `DEPRECATED_CONFIG_FIELDS`，`validateConfig` 放行、不写入 resolved，`apply` 检测到就 warn 一次。
+22. 给人看的预览与投递要分清：`previewChars` 只限制 `add_file` 返回值与权限卡片，卡片文案必须写明「这是卡片预览，存储与注入的都是全文」；`maxItems` 是拒绝式且默认不限，保留。
 
 ## 核心结论（已对安装版运行时验证）
 
@@ -104,6 +107,18 @@
     （0.7.0 迁移）。源码锚点：`dsh-session-projection/lib/index.js` 的
     `SessionProjectionRegistry.register/acquire`。
     兼容旧运行时（返回裸 disposer）时，`await` 得到函数、无 `stateOf`，`apply` 立即以明确的版本错误拒绝。
+19. **模型侧没有「读回全文」的通道**（0.10.0 实证，这条决定了截断机制必须删除而不是调参）：
+    `context_guard` 的 `TOOL_ACTIONS` 只有 `list`/`add_file`/`add_note`/`mount`/`unmount`，
+    `list` 的条目行只渲染 id/kind/title/path/flags（`renderItemLine`），正文要 `operations.content()`，
+    而 `content` 只挂在 Remote（抽屉/人类）。计划正文的原始载体是 `exit_plan_mode` 的 `tool/call`
+    arguments、备注是 `add_note` 的参数 —— 压缩替换掉的正是这些区间。所以截断 = 内容从模型世界消失。
+20. **平台自带的 `read` 也不是无限取回路径**：`dsh-tool-fs` 默认 `READ_MAX_BYTES = 50 * 1024`、
+    `READ_MAX_LINE_LENGTH = 2000`（`read-render.ts:11-14`），分页读取。所以「文件段带路径，模型自己读」
+    这个说法对 >50KB 的文件同样不成立。
+21. **`fs.readText` / `streamText` 在本地后端没有体积护栏**（`dsh-fs-local/lib/index.js:865-876`），
+    只有 `readBytes(target, signal, maxBytes)` 会抛 `FS_TOO_LARGE`（同文件 `:387-400`）。
+    删掉 `maxCharsPerFile` 后整读是新的真实成本：大文件会全量进上下文并驻留 Host 内存。
+    这是「pin 即全文」选择的代价，按用户决定不加拦截；读失败仍写成 `file unreadable` 可见标记。
 
 ## 实施状态
 
@@ -127,6 +142,7 @@
 - [x] 0.6.1：`add_file` 改读 live `Session.header.cwd`（`workingDirectory` 服务已删），45/45 测试
 - [x] 0.6.2：抽屉预览内联到展开条目正下方（`.pg-entry` 固定「卡片 → 预览」）、预览面板化（边框/左边线/`bg-layer-2`/`label-primary`，弃用 compact）、标题箭头 + 常驻收起 + 焦点回归、请求序号 + `content.id` 防串台，47/47 测试
 - [x] 0.8.0：root 判定改用 `Session.header.origin`（rc.5 移除 `agents.roots`）、`maxItems` 默认 0（不限）、权限问题卡片按 `maxCharsPerNote` 展示完整备注、文件预览标注真实字节数与截断，抽屉按 kind 显示字节/字符，57/57 测试
+- [x] 0.10.0：删除截断与省略（四个 maxChars…/maxTotalChars 配置废弃并忽略 + warn、投影 64k 上限移除、`fs.readText` 整读、`composeGuardText`/`composeUpdate` 去掉预算与 `omitted`、备注写入不再有长度限制、抽屉去掉 `maxLength` 与截断徽标、`stateVersion 4 → 5`），77/77 测试
 - [x] 0.9.0：批准结论改读结果正文 + `plan/mode` 结构佐证（`isError` 恒 false 的修正）、PTC `tool/ptc-dispatch` 结论、`effectivePlanState` 改 fail-closed（只有 `accepted === true` 才自动挂）、投影 `stateVersion 4`、挂载文件每步 `stat` 探测 + `(changed)` 全文重注 + `deliver` 记账、pending 第三桶 `changed`、`refreshChangedFiles` 配置、抽屉「结论未确认 / 磁盘已改动」标记，72/72 测试
 - [x] 0.9.0 离线重放验收：本机 30 个真实会话日志逐事件重折，12 份计划判定 10 批准 / 2 拒绝 / 0 未确认，与旧 fold 相比 2 处 `true → false`（均为 `The user dismissed…` 的被拒计划），无反向误判
 - [x] 视觉验收（0.3.0）：浅色/深色截图、与 Workspace files 面板并排比对、guide 卡片图标、控制台零报错
@@ -134,7 +150,7 @@
 
 ## 端到端数据流
 
-1. 模型提交 plan（原生或 PTC）→ projection `plan-guard-docs` 记 `{callId,title,size,turn,markdown(≤64k)}`；
+1. 模型提交 plan（原生或 PTC）→ projection `plan-guard-docs` 记 `{callId,title,size,turn,markdown(全文)}`；
    结论由同 callId 的 `tool/result`（PTC 为 `tool/ptc-dispatch`）正文读 `planVerdict`，认不出挂 `awaitingVerdict`
    等 `plan/mode {active:false}` 佐证，中途被 `tool/call`/`user/message`/`command/run` 打断就停在未确认；
    首次成功 `compaction/end` 把 `sawCompaction` 置真。
@@ -163,6 +179,7 @@
 - `packages/context/agent-instructions/src/index.ts:334-360` pre-step 注入模板
 - `packages/client/ui-tool/src/client/tool/ToolCallTree.tsx` 默认 GenericToolCard
 - `packages/api/gateway/src/index.ts` SRC 发现
+- `packages/tool/fs/src/index.ts` + `read-render.ts` `readMaxBytes`/`READ_MAX_BYTES`（自带 read 的分页与字节上限）
 - `packages/agent/agent/src/runtime-types.ts` `Agent.session.header.origin`（root/subagent 判定；0.2.2-rc.5 无 `agents.roots()`）
 
 ### 安装版运行时锚点（本机能直接核对的 0.2.2-rc.5 包）
@@ -177,7 +194,7 @@
 
 ## 验证
 
-- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（72/72）。
+- 已跑：`node --check index.js`、`node --check client.js`、`node --test test/*.test.js`（77/77；含 160k 文件 / 70k 备注 / 80k 计划的全文注入端到端，以及注入文本里 grep 不到 `truncat`/`omit` 标记）。
 - 已跑（0.9.0）：离线重放本机 `/root/.dsh/sessions/*/*/session.v4.jsonl.zstd` 全部 30 个会话，逐事件喂给 `foldDocs`；
   12 份计划 → 批准 10 / 拒绝 2 / 未确认 0，与旧 fold 逐份对比只有 2 处 `true → false`（`session-ca9aa2…`、
   `session-40d81a8e…` 里被驳回的计划），无 `false → true` 误判，且被拒计划 `effectivePlanState.mounted === false`。

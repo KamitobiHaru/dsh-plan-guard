@@ -44,6 +44,13 @@ function fakeFs() {
         for (let at = 0; at < file.text.length; at += 600) yield file.text.slice(at, at + 600)
       })()
     },
+    /** Whole-file read, the path the injector uses now that nothing truncates. */
+    async readText(target) {
+      const file = files.get(target.targetKey)
+      if (file === undefined) throw new Error(`ENOENT: no such file, open '${target.targetKey}'`)
+      counts.read += 1
+      return file.text
+    },
   }
 }
 
@@ -789,4 +796,72 @@ test('an unapproved plan is never injected, folded from real session events', as
   assert.match(injected.messages[1].content[0].text, /## Plan: 计划：已批准/)
   assert.match(injected.messages[1].content[0].text, /approved body/)
   assert.ok(!injected.messages[1].content[0].text.includes('secret body'), 'the dismissed plan stays out')
+})
+
+test('a huge mounted file reaches the model whole, with no cap in sight', async () => {
+  const fake = await setup()
+  const huge = `${'head\n'}${'x'.repeat(160000)}\nTAIL-END`
+  fake.ctx.fs.writeFile('/repo/huge.txt', { version: 'h1', size: huge.length, text: huge })
+  fake.setProjection({ docs: [], sawCompaction: true })
+  await fake.provided.get(SERVICE_KEY).addFile(SESSION_ID, 'huge.txt')
+
+  const result = await preStep(fake)
+  assert.equal(result.messages.length, 2)
+  const text = result.messages[1].content[0].text
+  assert.ok(text.includes('head\nxxx'), 'the body starts where the file starts')
+  assert.ok(text.includes('TAIL-END'), 'and the last byte of a 160k file is still there')
+  assert.ok(text.length > huge.length, 'the block is at least as big as what was pinned')
+  assert.ok(!/\[plan-guard:[^\]]*truncat/.test(text), 'no truncation marker')
+  assert.ok(!/\[plan-guard: omitted/.test(text), 'no omission marker')
+  const state = await fake.provided.get(SERVICE_KEY).list(SESSION_ID)
+  assert.equal(state.limits.maxTotalChars, undefined, 'the drawer no longer receives size caps')
+  assert.equal(state.limits.maxCharsPerFile, undefined)
+})
+
+test('an oversized note is stored and injected whole', async () => {
+  const fake = await setup()
+  fake.setProjection({ docs: [], sawCompaction: true })
+  const body = `first line\n${'n'.repeat(70000)}\nLAST LINE OF THE NOTE`
+  const added = await fake.tool().execute({ action: 'add_note', text: body }, execFor(fake, 'call-long'))
+  assert.match(added.text, /Added and mounted note/)
+  const result = await preStep(fake)
+  const text = result.messages[1].content[0].text
+  assert.ok(text.includes('LAST LINE OF THE NOTE'), 'a 70k note is not cut at the old 20k limit')
+  const listed = await fake.tool().execute({ action: 'list' }, execFor(fake, 'call-list-long'))
+  assert.match(listed.text, /note:/)
+})
+
+test('a plan longer than the old storage cap is kept and injected whole', async () => {
+  const callId = 'call_long_plan'
+  const markdown = `# 长计划\n${'p'.repeat(80000)}\nPLAN TAIL MARKER`
+  const folded = t.foldDocs(t.stateInit(), {
+    type: 'tool/call',
+    data: { turn: 1, step: 3, callId, name: 'exit_plan_mode', arguments: JSON.stringify({ plan: markdown }) },
+  })
+  assert.equal(folded.docs[0].markdown.length, markdown.length, 'the projection stores the whole plan')
+  assert.ok(!folded.docs[0].markdown.includes('truncated past'))
+  const settled = t.foldDocs(folded, {
+    type: 'tool/result',
+    data: {
+      turn: 1, step: 3,
+      message: {
+        role: 'tool', toolCallId: callId, isError: false,
+        content: [{ type: 'text', text: 'Plan approved — plan mode exited; carry out the plan starting with your next step.' }],
+      },
+    },
+  })
+  const fake = await setup()
+  fake.setProjection({ ...settled, sawCompaction: true })
+  const result = await preStep(fake)
+  assert.match(result.messages[1].content[0].text, /PLAN TAIL MARKER/)
+})
+
+test('deprecated cap fields activate with a warning instead of failing', async () => {
+  const fake = fakeContext()
+  const warnings = []
+  fake.ctx.logger = { debug() {}, warn(message) { warnings.push(message) }, error() {} }
+  await apply(fake.ctx, { defaultPolicy: 'allow-all', maxTotalChars: 5000, maxCharsPerNote: 2000 })
+  assert.ok(fake.tool(), 'the plugin still registers its tool')
+  assert.equal(warnings.filter(line => /deprecated config field/.test(line)).length, 1)
+  assert.match(warnings.join(' '), /maxTotalChars/)
 })

@@ -51,8 +51,15 @@ test('config defaults and validation', () => {
   assert.equal(defaults.allowOutsideWorkspace, false)
   assert.equal(defaults.refreshChangedFiles, true)
   assert.ok(t.validateConfig({ refreshChangedFiles: 'yes' }).issues)
-  assert.equal(defaults.maxCharsPerNote, 20000)
+  assert.equal(defaults.maxCharsPerNote, undefined, 'the injection caps are gone, not reinterpreted')
+  assert.equal(defaults.maxTotalChars, undefined)
 
+  // A profile row that still sets them must activate: they are read and dropped,
+  // never surfaced as issues, and never copied into the resolved config.
+  const stale = t.validateConfig({ maxCharsPerPlan: 1, maxCharsPerFile: 2, maxCharsPerNote: 3, maxTotalChars: 4 })
+  assert.equal(stale.issues, undefined)
+  assert.deepEqual([...t.DEPRECATED_CONFIG_FIELDS], ['maxCharsPerPlan', 'maxCharsPerFile', 'maxCharsPerNote', 'maxTotalChars'])
+  for (const field of t.DEPRECATED_CONFIG_FIELDS) assert.equal(stale.value[field], undefined)
   assert.ok(t.validateConfig({ defaultPolicy: 'nope' }).issues)
   assert.equal(t.validateConfig({ maxItems: 0 }).value.maxItems, 0)
   assert.ok(t.validateConfig({ maxItems: -1 }).issues)
@@ -201,8 +208,9 @@ test('injection composition includes mounted plans, notes, and files', () => {
   assert.ok(composed.text.indexOf('Constraint') < composed.text.indexOf('Model note'))
 })
 
-test('injection composition marks unreadable and truncated files', () => {
+test('injection composition reports an unreadable file and never cuts a readable one', () => {
   const cfg = baseConfig()
+  const big = `head\n${'z'.repeat(150000)}\ntail`
   const rec = record({
     items: {
       'file:bad': fileItem('file:bad', { displayPath: 'missing.ts' }),
@@ -216,31 +224,30 @@ test('injection composition marks unreadable and truncated files', () => {
     sawCompaction: true,
     contents: {
       'file:bad': { error: 'FS_NOT_FOUND: missing' },
-      'file:big': { text: 'x'.repeat(20), truncated: true },
+      'file:big': { text: big },
     },
   })
   assert.ok(composed)
   assert.match(composed.text, /file unreadable: FS_NOT_FOUND/)
-  assert.match(composed.text, /file truncated at 20000 characters/)
+  assert.ok(composed.text.includes('\n\nhead\n'), 'the body starts where the file starts')
+  assert.ok(composed.text.includes('\ntail'), 'a 150k body is delivered whole')
+  assert.ok(!/\[plan-guard:[^\]]*truncat/.test(composed.text), 'no truncation marker anywhere')
+  assert.ok(!/\[plan-guard: omitted/.test(composed.text), 'no omission marker anywhere')
 })
 
-test('injection composition enforces the total cap and lists omissions', () => {
-  const cfg = { ...baseConfig(), maxTotalChars: 5000, maxCharsPerNote: 2000 }
+test('a snapshot larger than any old total cap is delivered in full', () => {
+  const cfg = baseConfig()
   const items = {}
   for (let i = 0; i < 6; i += 1) {
     const id = `note:n${i}`
-    items[id] = noteItem(id, { title: `Note ${i}`, text: 'y'.repeat(1400), size: 1400, createdAt: i })
+    items[id] = noteItem(id, { title: `Note ${i}`, text: `n${i} ${'y'.repeat(40000)} END${i}`, size: 40006, createdAt: i })
   }
-  const composed = t.composeGuardText({
-    docs: [],
-    record: record({ items }),
-    config: cfg,
-    sawCompaction: true,
-  })
+  const composed = t.composeGuardText({ docs: [], record: record({ items }), config: cfg, sawCompaction: true })
   assert.ok(composed)
-  assert.ok(composed.omitted.length > 0)
-  assert.match(composed.text, /omitted over the total cap:/)
-  assert.ok(composed.included.length + composed.omitted.length === 6)
+  assert.equal(composed.omitted, undefined, 'the omission list is gone from the contract')
+  assert.equal(composed.included.length, 6)
+  for (let i = 0; i < 6; i += 1) assert.ok(composed.text.includes(`END${i}`), `note ${i} tail survived`)
+  assert.ok(composed.text.length > 240000, 'the block is as big as what was pinned')
 })
 
 test('removal notices carry the title and the unique id', () => {
@@ -772,17 +779,17 @@ test('incremental update drops changes that no longer hold', () => {
   assert.equal(readded, undefined, 'a removal that was undone reports nothing')
 })
 
-test('incremental update respects the total cap', () => {
-  const cfg = { ...baseConfig(), maxTotalChars: 5000, maxCharsPerNote: 2000 }
+test('an incremental update delivers oversized additions whole', () => {
+  const cfg = baseConfig()
   const items = {}
   const added = {}
   for (let i = 0; i < 6; i += 1) {
     const id = `note:n${i}`
-    items[id] = noteItem(id, { title: `Note ${i}`, text: 'y'.repeat(1400), size: 1400, createdAt: i })
+    items[id] = noteItem(id, { title: `Note ${i}`, text: `${'y'.repeat(30000)}\nEND${i}`, size: 30006, createdAt: i })
     added[id] = { kind: 'note', id, label: `Note ${i}` }
   }
   const update = t.composeUpdate({
-    pending: { added, removed: {} },
+    pending: { added, changed: {}, removed: {} },
     record: record({ items }),
     docs: [],
     config: cfg,
@@ -790,8 +797,9 @@ test('incremental update respects the total cap', () => {
     contents: {},
   })
   assert.ok(update)
-  assert.match(update.text, /omitted over the total cap:/)
-  assert.ok(update.added.length < 6)
+  assert.equal(update.omitted, undefined)
+  assert.equal(update.added.length, 6)
+  for (let i = 0; i < 6; i += 1) assert.ok(update.text.includes(`END${i}`))
 })
 
 test('the permission card shows a full note body with a scroll hint', () => {
